@@ -6,6 +6,16 @@ jest.mock('undici', () => ({ request: jest.fn() }));
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { request: mockUndiciRequest } = jest.requireMock('undici') as { request: jest.Mock };
 
+// Spy on encryptRequest so tests can inspect the plaintext payload sent to
+// Honda's auth endpoints (e.g. to confirm the locale fix below), while
+// still exercising the real AES/RSA envelope end to end.
+jest.mock('../../src/api/crypto', () => {
+  const actual = jest.requireActual('../../src/api/crypto');
+  return { ...actual, encryptRequest: jest.fn(actual.encryptRequest) };
+});
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const cryptoModule = require('../../src/api/crypto') as typeof import('../../src/api/crypto');
+
 import { HondaApiClient, HondaClientLogger } from '../../src/api/client';
 import { HondaCapabilityError, HondaVehicleUnreachableError } from '../../src/api/errors';
 import { VehicleCapabilities } from '../../src/api/vehicle';
@@ -68,6 +78,39 @@ const INCAPABLE_VEHICLE = {
 
 beforeEach(() => {
   mockUndiciRequest.mockReset();
+  (cryptoModule.encryptRequest as jest.Mock).mockClear();
+});
+
+describe('HondaApiClient login locale handling (regression for Honda HTTP 400)', () => {
+  it('sends a bare 2-letter locale to Honda even with the default "en-GB" config value', async () => {
+    // Reproduces the exact live-account failure: config.locale defaults to
+    // "en-GB" (see config.schema.json), which Honda's /auth/initiate-login
+    // rejects with HTTP 400 if sent verbatim — it only accepts a bare
+    // 2-letter code. No config.locale is passed here, exercising the same
+    // default a real user's config produces.
+    queueResponses({
+      'POST /auth/initiate-login': jsonResponse(200, { transactionId: 't', signatureChallenge: 'c' }),
+      'POST /auth/complete-login': jsonResponse(200, { access_token: 'a.b.c', refresh_token: 'r', expires_in: 3600 }),
+    });
+
+    const client = new HondaApiClient({ email: 'user@example.com', password: 'p', storagePath: tempStoragePath(), log: silentLogger() });
+    await client.login();
+
+    const mock = cryptoModule.encryptRequest as jest.Mock;
+    const locales = mock.mock.calls.map(([payload]) => (payload as Record<string, unknown>).locale);
+    expect(locales).toEqual(['en', 'en']);
+  });
+
+  it('rejects cleanly (no crash, no misclassification) when Honda returns HTTP 400 from initiate-login', async () => {
+    queueResponses({
+      'POST /auth/initiate-login': jsonResponse(400, { errorCode: 'validation-error' }),
+    });
+
+    const client = new HondaApiClient({ email: 'user@example.com', password: 'p', storagePath: tempStoragePath(), log: silentLogger() });
+
+    await expect(client.login()).rejects.toThrow(/initiate-login/);
+    expect(client.isAuthenticated).toBe(false);
+  });
 });
 
 describe('HondaApiClient login + basic requests', () => {

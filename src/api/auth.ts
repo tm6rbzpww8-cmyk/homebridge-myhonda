@@ -53,6 +53,25 @@ export interface LoginResult {
   tokens: RawLoginTokens;
 }
 
+/**
+ * Honda's `/auth/initiate-login` and `/auth/complete-login` endpoints
+ * expect `locale` as a bare, lowercase ISO 639-1 language code — "en",
+ * "it", "de" — never a full BCP-47 tag like "en-GB". Sending anything else
+ * fails validation with HTTP 400 before Honda even attempts to decrypt the
+ * payload. The reference client (pymyhondaplus) never sends anything but a
+ * bare code here, matching its own documented `--locale de` / `--locale it`
+ * CLI usage.
+ *
+ * The rest of this plugin's config format (and Honda's separate
+ * `/tsp`/`/user` query-string `language`/`country` parameters) are
+ * unaffected — this only normalizes the value going into the encrypted
+ * auth payload, so a config value like "en-GB" keeps working unchanged.
+ */
+export function toHondaLocale(locale: string): string {
+  const language = locale.split('-')[0]?.trim().toLowerCase();
+  return language || 'en';
+}
+
 export class HondaAuth {
   constructor(
     private readonly http: HttpClient,
@@ -65,7 +84,7 @@ export class HondaAuth {
       userPassword: password,
       devicePublicKey: this.deviceKey.publicKeyB64,
       keyIdentifier: this.deviceKey.keyIdentifier,
-      locale,
+      locale: toHondaLocale(locale),
       fingerprintSupport: false,
       frontCameraSupport: false,
       faceSupport: false,
@@ -105,7 +124,7 @@ export class HondaAuth {
       userPassword: password,
       keyIdentifier: this.deviceKey.keyIdentifier,
       identityProvider: 'isv-prod',
-      locale,
+      locale: toHondaLocale(locale),
       transactionId,
       signedChallengeResponse: signedChallenge,
     });
