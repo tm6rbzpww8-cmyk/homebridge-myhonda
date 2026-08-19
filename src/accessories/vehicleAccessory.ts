@@ -239,8 +239,15 @@ export class VehicleAccessory {
   }
 
   private setupBatteryService(): void {
+    const name = this.serviceName('Battery');
     const battery = this.accessory.getService(this.Service.Battery)
-      ?? this.accessory.addService(this.Service.Battery, this.serviceName('Battery'));
+      ?? this.accessory.addService(this.Service.Battery, name);
+    // Explicitly refresh Name on every construction, not just at creation:
+    // an accessory cached from before this naming scheme (or any future
+    // rename) would otherwise keep showing its old, already-persisted name
+    // forever, since addService()'s name argument only takes effect when
+    // the service doesn't already exist.
+    battery.setCharacteristic(this.Characteristic.Name, name);
     battery.getCharacteristic(this.Characteristic.BatteryLevel).onGet(() => this.lastStatus?.batteryLevelPercent ?? 0);
     battery.getCharacteristic(this.Characteristic.ChargingState).onGet(() => this.chargingState());
     battery.getCharacteristic(this.Characteristic.StatusLowBattery).onGet(() =>
@@ -268,8 +275,10 @@ export class VehicleAccessory {
   }
 
   private setupChargeCableService(): void {
+    const name = this.serviceName('Charge Cable');
     const contact = this.accessory.getService(this.Service.ContactSensor)
-      ?? this.accessory.addService(this.Service.ContactSensor, this.serviceName('Charge Cable'));
+      ?? this.accessory.addService(this.Service.ContactSensor, name);
+    contact.setCharacteristic(this.Characteristic.Name, name);
     contact.getCharacteristic(this.Characteristic.ContactSensorState).onGet(() =>
       this.lastStatus?.plugStatus === 'connected'
         ? this.Characteristic.ContactSensorState.CONTACT_DETECTED
@@ -279,7 +288,10 @@ export class VehicleAccessory {
   }
 
   private setupClimateSwitch(): void {
-    const sw = this.accessory.addService(this.Service.Switch, this.serviceName('Climate'), 'climate');
+    const name = this.serviceName('Climate');
+    const sw = this.accessory.getServiceById(this.Service.Switch, 'climate')
+      ?? this.accessory.addService(this.Service.Switch, name, 'climate');
+    sw.setCharacteristic(this.Characteristic.Name, name);
     sw.getCharacteristic(this.Characteristic.On)
       .onGet(() => this.lastStatus?.climateActive ?? false)
       .onSet(async (value) => {
@@ -297,7 +309,10 @@ export class VehicleAccessory {
   }
 
   private setupChargeSwitch(): void {
-    const sw = this.accessory.addService(this.Service.Switch, this.serviceName('Charging'), 'charging');
+    const name = this.serviceName('Charging');
+    const sw = this.accessory.getServiceById(this.Service.Switch, 'charging')
+      ?? this.accessory.addService(this.Service.Switch, name, 'charging');
+    sw.setCharacteristic(this.Characteristic.Name, name);
     sw.getCharacteristic(this.Characteristic.On)
       .onGet(() => this.lastStatus?.chargeStatus === 'charging')
       .onSet(async (value) => {
@@ -315,7 +330,10 @@ export class VehicleAccessory {
   }
 
   private setupHornSwitch(): void {
-    const sw = this.accessory.addService(this.Service.Switch, this.serviceName('Find My Car'), 'horn');
+    const name = this.serviceName('Find My Car');
+    const sw = this.accessory.getServiceById(this.Service.Switch, 'horn')
+      ?? this.accessory.addService(this.Service.Switch, name, 'horn');
+    sw.setCharacteristic(this.Characteristic.Name, name);
     const onCharacteristic = sw.getCharacteristic(this.Characteristic.On);
     onCharacteristic
       .onGet(() => false)
@@ -337,11 +355,10 @@ export class VehicleAccessory {
   }
 
   private setupPresenceSensor(): void {
-    const sensor = this.accessory.addService(
-      this.Service.OccupancySensor,
-      this.serviceName('Away From Home'),
-      'presence',
-    );
+    const name = this.serviceName('Away From Home');
+    const sensor = this.accessory.getServiceById(this.Service.OccupancySensor, 'presence')
+      ?? this.accessory.addService(this.Service.OccupancySensor, name, 'presence');
+    sensor.setCharacteristic(this.Characteristic.Name, name);
     sensor.getCharacteristic(this.Characteristic.OccupancyDetected).onGet(() =>
       this.lastStatus?.homeAway === 'away'
         ? this.Characteristic.OccupancyDetected.OCCUPANCY_DETECTED
@@ -354,11 +371,15 @@ export class VehicleAccessory {
     if (this.service.temperature) {
       return this.service.temperature;
     }
-    const sensor = this.accessory.addService(
-      this.Service.TemperatureSensor,
-      this.serviceName('Cabin Temperature'),
-      'cabin-temp',
-    );
+    // Guard against a cached accessory that already has this service from a
+    // previous run (this method is called lazily, from applyStatus(), so
+    // this.service.temperature above is only populated once per instance —
+    // it says nothing about whether the underlying HAP accessory already
+    // has the service from before this VehicleAccessory was constructed).
+    const name = this.serviceName('Cabin Temperature');
+    const sensor = this.accessory.getServiceById(this.Service.TemperatureSensor, 'cabin-temp')
+      ?? this.accessory.addService(this.Service.TemperatureSensor, name, 'cabin-temp');
+    sensor.setCharacteristic(this.Characteristic.Name, name);
     sensor.getCharacteristic(this.Characteristic.CurrentTemperature).onGet(() => this.lastStatus?.cabinTempCelsius ?? 0);
     this.service.temperature = sensor;
     return sensor;

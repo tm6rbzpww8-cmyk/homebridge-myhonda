@@ -112,6 +112,38 @@ function buildAccessory(
   return { platformAccessory, accessory, log };
 }
 
+/**
+ * Constructs a *second* VehicleAccessory against an *already-populated*
+ * PlatformAccessory — the same object a real Homebridge restart hands the
+ * platform: configureAccessory() restores a cached accessory (services
+ * already attached, exactly as persisted from the previous run), and the
+ * platform then constructs a fresh VehicleAccessory instance wrapping it.
+ * hap-nodejs's duplicate-service check operates purely on the accessory's
+ * current .services array, so reusing the same in-memory object here is a
+ * faithful reproduction of that restart scenario regardless of whether the
+ * pre-existing services came from an actual disk round-trip.
+ */
+function rebuildAccessory(
+  platformAccessory: PlatformAccessory,
+  vehicle: Vehicle,
+  client: HondaApiClient,
+  options: VehicleAccessoryOptions = FULL_OPTIONS,
+  log: Logger = fakeLogger(),
+) {
+  const accessory = new VehicleAccessory(fakeApi(), log, platformAccessory as any, vehicle, client, options, undefined);
+  return { accessory, log };
+}
+
+/** Counts services grouped by "UUID:subtype" — a duplicate means more than one entry shares a key. */
+function serviceCountsByUuidAndSubtype(platformAccessory: PlatformAccessory): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const svc of platformAccessory.services) {
+    const key = `${svc.UUID}:${svc.subtype ?? ''}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
 describe('VehicleAccessory service setup', () => {
   it('always adds a Lock Mechanism service', () => {
     const { platformAccessory } = buildAccessory(makeVehicle(), fakeClient());
@@ -153,6 +185,112 @@ describe('VehicleAccessory service setup', () => {
     expect(info.getCharacteristic(Characteristic.Manufacturer).value).toBe('Honda');
     expect(info.getCharacteristic(Characteristic.Model).value).toBe('Honda e');
     expect(info.getCharacteristic(Characteristic.SerialNumber).value).toBe('VIN123');
+  });
+});
+
+describe('VehicleAccessory restart / cached-accessory reconstruction (regression for "Cannot add a Service with the same UUID")', () => {
+  // Reported live: after a real Homebridge restart, Homebridge's own
+  // configureAccessory() hands the platform a PlatformAccessory restored
+  // from its on-disk cache — services already attached from the previous
+  // run — before the platform constructs a fresh VehicleAccessory around
+  // it. That reconstruction must not try to re-add services that already
+  // exist on the accessory. rebuildAccessory() reproduces exactly that:
+  // a second VehicleAccessory built against an already-populated accessory.
+
+  it('does not throw when constructed a second time against an already-populated accessory (the reported crash)', () => {
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+
+    expect(() => rebuildAccessory(platformAccessory, makeVehicle({}, FULL_CAPS), fakeClient())).not.toThrow();
+  });
+
+  it('every intended service exists exactly once after a simulated restart — no duplicate UUID/subtype pairs, for any service', () => {
+    const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+    // Populate the lazily-created Cabin Temperature sensor too, before the
+    // "restart" — it's the one service added outside the constructor, via
+    // applyStatus(), so it needs its own duplicate-on-reconstruction check.
+    accessory.applyStatus(evStatus({ cabinTempCelsius: 20 }));
+
+    rebuildAccessory(platformAccessory, makeVehicle({}, FULL_CAPS), fakeClient());
+
+    const counts = serviceCountsByUuidAndSubtype(platformAccessory);
+    for (const [key, count] of counts) {
+      expect({ key, count }).toEqual({ key, count: 1 });
+    }
+    // Sanity: every expected service actually made it into the count at all
+    // (a bug that silently dropped a service would also "pass" a bare
+    // no-duplicates check).
+    expect(counts.size).toBe(9); // AccessoryInformation, Lock, Battery, ContactSensor, 3 Switches, OccupancySensor, TemperatureSensor
+  });
+
+  it('specifically covers the Charging switch (subtype "charging") reported in the crash', () => {
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+    rebuildAccessory(platformAccessory, makeVehicle({}, FULL_CAPS), fakeClient());
+
+    const chargingServices = platformAccessory.services
+      .filter((s) => s.UUID === Service.Switch.UUID && s.subtype === 'charging');
+    expect(chargingServices).toHaveLength(1);
+  });
+
+  it('covers every other subtype-keyed service too: Climate, Find My Car, and Away From Home', () => {
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+    rebuildAccessory(platformAccessory, makeVehicle({}, FULL_CAPS), fakeClient());
+
+    expect(platformAccessory.getServiceById(Service.Switch, 'climate')).toBeDefined();
+    expect(platformAccessory.getServiceById(Service.Switch, 'horn')).toBeDefined();
+    expect(platformAccessory.getServiceById(Service.OccupancySensor, 'presence')).toBeDefined();
+    for (const key of ['climate', 'horn']) {
+      expect(platformAccessory.services
+        .filter((s) => s.UUID === Service.Switch.UUID && s.subtype === key)).toHaveLength(1);
+    }
+    expect(platformAccessory.services
+      .filter((s) => s.UUID === Service.OccupancySensor.UUID)).toHaveLength(1);
+  });
+
+  it('covers the non-subtype services too (Lock, Battery, Charge Cable) — no duplicates on reconstruction', () => {
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+    rebuildAccessory(platformAccessory, makeVehicle({}, FULL_CAPS), fakeClient());
+
+    for (const type of [Service.LockMechanism, Service.Battery, Service.ContactSensor]) {
+      expect(platformAccessory.services.filter((s) => s.UUID === type.UUID)).toHaveLength(1);
+    }
+  });
+
+  it('covers the lazily-added Cabin Temperature sensor: no duplicate if applyStatus runs again after reconstruction', () => {
+    const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+    accessory.applyStatus(evStatus({ cabinTempCelsius: 18 }));
+
+    const { accessory: rebuiltAccessory } = rebuildAccessory(platformAccessory, makeVehicle({}, FULL_CAPS), fakeClient());
+    expect(() => rebuiltAccessory.applyStatus(evStatus({ cabinTempCelsius: 19 }))).not.toThrow();
+
+    const tempServices = platformAccessory.services
+      .filter((s) => s.UUID === Service.TemperatureSensor.UUID);
+    expect(tempServices).toHaveLength(1);
+    expect(tempServices[0].getCharacteristic(Characteristic.CurrentTemperature).value).toBe(19);
+  });
+
+  it('refreshes each service Name on reconstruction, so a name-scheme change (e.g. 81b0ebc) takes effect on already-cached accessories', () => {
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+    // Simulate an accessory that was cached under the OLD prefixed-name
+    // scheme, before the reconstruction refreshes it.
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+    lock.updateCharacteristic(Characteristic.Name, 'Blue Honda e Doors');
+    const chargeSwitch = platformAccessory.getServiceById(Service.Switch, 'charging')!;
+    chargeSwitch.updateCharacteristic(Characteristic.Name, 'Blue Honda e Charging');
+
+    rebuildAccessory(platformAccessory, makeVehicle({}, FULL_CAPS), fakeClient());
+
+    expect(lock.getCharacteristic(Characteristic.Name).value).toBe('Doors');
+    expect(chargeSwitch.getCharacteristic(Characteristic.Name).value).toBe('Charging');
+  });
+
+  it('reconstruction still marks Lock primary and keeps Battery linked to it, without duplicating the link', () => {
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+    rebuildAccessory(platformAccessory, makeVehicle({}, FULL_CAPS), fakeClient());
+
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+    const battery = platformAccessory.getService(Service.Battery)!;
+    expect(lock.isPrimaryService).toBe(true);
+    expect(lock.linkedServices).toEqual([battery]);
   });
 });
 
