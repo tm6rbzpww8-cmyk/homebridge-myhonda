@@ -156,6 +156,80 @@ describe('VehicleAccessory service setup', () => {
   });
 });
 
+describe('VehicleAccessory HomeKit service naming', () => {
+  // Regression coverage for the "every tile just shows the vehicle name"
+  // issue: each service's Name characteristic must be a short, distinct
+  // label — NOT prefixed with the vehicle's own nickname (the old
+  // "<nickname> Doors" form) — because Apple's Home app collapses a
+  // service's displayed label back to the accessory name when the
+  // service's own name is just a repeat of it.
+  it('constructs a full Honda EV accessory with every expected service, name, and subtype', () => {
+    const { platformAccessory, accessory } = buildAccessory(
+      makeVehicle({ nickname: 'Blue Honda e' }, FULL_CAPS),
+      fakeClient(),
+    );
+    accessory.applyStatus(evStatus({ cabinTempCelsius: 19 }));
+
+    const expectations: Array<{ service: typeof Service.LockMechanism; subtype?: string; name: string }> = [
+      { service: Service.LockMechanism, name: 'Doors' },
+      { service: Service.Battery, name: 'Battery' },
+      { service: Service.ContactSensor, name: 'Charge Cable' },
+      { service: Service.Switch, subtype: 'climate', name: 'Climate' },
+      { service: Service.Switch, subtype: 'charging', name: 'Charging' },
+      { service: Service.Switch, subtype: 'horn', name: 'Find My Car' },
+      { service: Service.OccupancySensor, subtype: 'presence', name: 'Away From Home' },
+      { service: Service.TemperatureSensor, subtype: 'cabin-temp', name: 'Cabin Temperature' },
+    ];
+
+    for (const { service: serviceType, subtype, name } of expectations) {
+      const service = subtype
+        ? platformAccessory.getServiceById(serviceType, subtype)
+        : platformAccessory.getService(serviceType);
+      expect(service).toBeDefined();
+      expect(service!.getCharacteristic(Characteristic.Name).value).toBe(name);
+      // None of these should ever start with the vehicle's nickname — that
+      // redundant-prefix form is exactly the bug this test guards against.
+      expect(service!.getCharacteristic(Characteristic.Name).value).not.toMatch(/^Blue Honda e/);
+    }
+  });
+
+  it('does not prefix service names with the vehicle nickname, model, or "Honda"', () => {
+    const { platformAccessory } = buildAccessory(makeVehicle({ nickname: 'My Honda e' }, FULL_CAPS), fakeClient());
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+    expect(lock.getCharacteristic(Characteristic.Name).value).toBe('Doors');
+  });
+
+  it('marks the Lock Mechanism (Doors) as the accessory primary service', () => {
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+    expect(lock.isPrimaryService).toBe(true);
+  });
+
+  it('links the Battery service to the Lock Mechanism, so Home can show it on the Doors tile', () => {
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+    const battery = platformAccessory.getService(Service.Battery)!;
+    expect(lock.linkedServices).toContain(battery);
+  });
+
+  it('does not link Battery to Lock for a non-electric vehicle (no Battery service exists)', () => {
+    const { platformAccessory } = buildAccessory(makeVehicle({ fuelType: 'P' }, FULL_CAPS), fakeClient());
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+    expect(lock.linkedServices).toEqual([]);
+  });
+
+  it('gives every Switch/sensor service a distinct HAP subtype so they persist as separate services', () => {
+    const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+    accessory.applyStatus(evStatus({ cabinTempCelsius: 20 }));
+
+    expect(platformAccessory.getServiceById(Service.Switch, 'climate')).toBeDefined();
+    expect(platformAccessory.getServiceById(Service.Switch, 'charging')).toBeDefined();
+    expect(platformAccessory.getServiceById(Service.Switch, 'horn')).toBeDefined();
+    expect(platformAccessory.getServiceById(Service.OccupancySensor, 'presence')).toBeDefined();
+    expect(platformAccessory.getServiceById(Service.TemperatureSensor, 'cabin-temp')).toBeDefined();
+  });
+});
+
 describe('VehicleAccessory applyStatus', () => {
   it('updates lock, battery, contact, switch and presence characteristics', () => {
     const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());

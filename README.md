@@ -19,16 +19,21 @@ work with those too, but only the Honda e has been verified end-to-end — see
 
 ## What you get in the Home app
 
-| HomeKit service | Honda data it reflects | Notes |
-|---|---|---|
-| **Lock** | Door lock state; lock/unlock command | Reflects Honda's real-time door lock status; lock/unlock control requires the vehicle's remote-lock capability |
-| **Battery** | State of charge, charging state, low-battery flag | Electric vehicles only |
-| **Contact Sensor** ("Charge Cable") | Whether the charge cable is plugged in | Electric vehicles only |
-| **Switch** ("Climate") | Start/stop remote climate pre-conditioning | Only shown if your vehicle supports it |
-| **Switch** ("Charging") | Start/stop charging | Only shown if your vehicle supports it |
-| **Switch** ("Find My Car") | Sound the horn & flash the lights | Momentary switch, auto-resets after firing |
-| **Occupancy Sensor** ("Away From Home") | Honda's own home/away geofence signal | Handy for "when my car leaves home…" automations |
-| **Temperature Sensor** | Cabin temperature | Only added once Honda reports a value |
+| HomeKit service | Shown as | Honda data it reflects | Notes |
+|---|---|---|---|
+| **Lock** | "Doors" | Door lock state; lock/unlock command | The accessory's primary service; lock/unlock control requires the vehicle's remote-lock capability |
+| **Battery** | "Battery" | State of charge, charging state, low-battery flag | Electric vehicles only. Linked to the Doors service so Home can show a battery badge alongside it |
+| **Contact Sensor** | "Charge Cable" | Whether the charge cable is plugged in | Electric vehicles only. HomeKit's contact-sensor states are always labelled "Open"/"Closed" by Apple's Home app — "Open" here means the cable is *unplugged*, not that a door is open |
+| **Switch** | "Climate" | Start/stop remote climate pre-conditioning | Only shown if your vehicle supports it |
+| **Switch** | "Charging" | Start/stop charging | Only shown if your vehicle supports it |
+| **Switch** | "Find My Car" | Sound the horn & flash the lights | Momentary switch, auto-resets after firing |
+| **Occupancy Sensor** | "Away From Home" | Honda's own home/away geofence signal | Handy for "when my car leaves home…" automations. Apple's Home app always labels occupancy sensor states "Triggered"/"Not Triggered" |
+| **Temperature Sensor** | "Cabin Temperature" | Cabin temperature | Only added once Honda reports a value |
+
+Each service's own name (shown in the "Shown as" column) is what appears on its tile in the
+Home app — every vehicle's accessory groups all of these together, so with two vehicles you'll
+see e.g. "Doors" under both your Honda e and your CR-V, distinguished by which accessory/room
+they're in, the same way any other multi-service HomeKit accessory works.
 
 Everything is driven entirely by what Honda's API actually reports for **your** vehicle: a
 switch or sensor only appears if Honda says the underlying capability is active for your VIN.
@@ -44,7 +49,7 @@ automation tool — see [Logging](#logging).
 ## Requirements
 
 - Homebridge 1.8 or newer (or the 2.0 beta)
-- Node.js 18.20.4+, 20.18.1+, or 22.10.0+
+- Node.js 18.20.4+, 20.18.1+, 22.10.0+, or 24.x
 - An active [My Honda+](https://www.honda.co.uk/cars/owners/my-honda-plus.html) account with at
   least one vehicle linked, and an active remote-services subscription for that vehicle
 

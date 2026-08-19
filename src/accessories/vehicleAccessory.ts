@@ -8,14 +8,40 @@
  * capabilities say the remote command is supported. Nothing here invents
  * functionality the API doesn't provide.
  *
- *   - Lock Mechanism   → door lock status, and lock/unlock if supported
+ *   - Lock Mechanism (primary) → door lock status, lock/unlock if supported
  *   - Battery Service   → state of charge, charging state, low-battery flag
+ *                         (linked to the Lock service, see below)
  *   - Contact Sensor    → charge cable connected/disconnected
  *   - Switch            → climate pre-conditioning on/off (if supported)
  *   - Switch            → charging on/off (if supported)
  *   - Switch (momentary) → horn & lights "find my car" (if supported)
  *   - Occupancy Sensor   → vehicle away-from-home presence
  *   - Temperature Sensor → cabin temperature (if reported)
+ *
+ * Naming: each service's Name characteristic is a short, self-contained
+ * label ("Doors", "Climate", "Charging", ...) rather than being prefixed
+ * with the vehicle's own name (the previous "<nickname> Doors" form).
+ * HomeKit already associates every service with its parent accessory —
+ * whose own name is the vehicle's nickname — so prefixing each service's
+ * name with that same nickname makes it start with a redundant repeat of
+ * text Home already shows for the accessory. In practice (confirmed
+ * against real Apple Home renderings, not just spec-reading) that
+ * redundant-prefix form is exactly what caused every tile to display as
+ * just the vehicle's name instead of the intended "Doors" / "Climate" /
+ * etc. — Apple doesn't publish the precise tile-labelling algorithm this
+ * falls out of, but short, distinct, non-prefixed service names are the
+ * documented HAP-compliant baseline (Characteristic.Name) and are what
+ * every well-behaved multi-service Homebridge accessory uses.
+ *
+ * The Lock Mechanism is marked the accessory's *primary* service
+ * (`setPrimaryService`) — the standard HAP mechanism for telling HomeKit
+ * which service represents "the accessory" for icon/category purposes —
+ * and the Battery service is *linked* to it (`addLinkedService`), the
+ * documented HAP pattern for surfacing a battery indicator alongside the
+ * service it powers (the same mechanism a battery-powered smart lock
+ * uses). This is what makes charge % show as a badge on the Doors tile
+ * rather than sitting in its own easy-to-miss row — Battery is not a
+ * service Apple gives its own tile in the Home grid on its own.
  */
 
 import type { API, Characteristic, Logger, PlatformAccessory, Service } from 'homebridge';
@@ -148,6 +174,9 @@ export class VehicleAccessory {
     const lock = this.accessory.getService(this.Service.LockMechanism)
       ?? this.accessory.addService(this.Service.LockMechanism, name);
     lock.setCharacteristic(this.Characteristic.Name, name);
+    // The service HomeKit treats as "the accessory" for icon/category
+    // purposes — locking/unlocking the vehicle is its most central control.
+    lock.setPrimaryService(true);
 
     lock.getCharacteristic(this.Characteristic.LockCurrentState).onGet(() => this.lockCurrentState());
     lock.getCharacteristic(this.Characteristic.LockTargetState)
@@ -195,6 +224,13 @@ export class VehicleAccessory {
         : this.Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL,
     );
     this.service.battery = battery;
+
+    // Link to the primary (Lock) service so the Home app can surface the
+    // battery indicator alongside the Doors tile, the same documented HAP
+    // pattern used for e.g. a battery-powered smart lock — Battery has no
+    // tile of its own in the Home grid, so an unlinked Battery service is
+    // easy to miss entirely.
+    this.service.lock?.addLinkedService(battery);
   }
 
   private chargingState(): number {
@@ -303,9 +339,15 @@ export class VehicleAccessory {
     return sensor;
   }
 
-  private serviceName(suffix: string): string {
-    const base = this.vehicle.nickname || this.vehicle.modelName || 'Honda';
-    return `${base} ${suffix}`;
+  /**
+   * Short, self-contained service label (e.g. "Doors", "Climate") — not
+   * prefixed with the vehicle's name. See the class-level doc comment for
+   * why: HomeKit already shows the accessory (vehicle) name for context,
+   * and a redundant repeat of it in the service name is what caused every
+   * tile to display as just the vehicle's name in the Home app.
+   */
+  private serviceName(label: string): string {
+    return label;
   }
 
   /** Applies freshly fetched dashboard data to all HomeKit characteristics. */

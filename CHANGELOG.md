@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+- Fixed HomeKit service naming: every service (Doors, Battery, Charge Cable, Climate, Charging,
+  Find My Car, Away From Home, Cabin Temperature) now has a short, self-contained name instead of
+  being prefixed with the vehicle's own nickname — the prefixed form was displaying as just the
+  vehicle's name for every control in the Home app. The Lock Mechanism ("Doors") is now marked
+  the accessory's primary service, and the Battery service is linked to it so a battery indicator
+  can appear on the Doors tile, per the standard HAP pattern for battery-powered accessories.
+  No authentication, API, encryption, or configuration changes.
+
 ## [1.0.0] - 2026-08-19
 
 Initial release.
