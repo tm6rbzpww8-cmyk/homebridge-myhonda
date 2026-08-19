@@ -156,6 +156,96 @@ describe('VehicleAccessory service setup', () => {
   });
 });
 
+describe('VehicleAccessory Lock Current/Target State mapping (regression for "exceeded maximum of 1")', () => {
+  // Reported live: "This plugin generated a warning from the characteristic
+  // 'Lock Target State': characteristic was supplied illegal value: number 3
+  // exceeded maximum of 1." That exact message is hap-nodejs's own
+  // Characteristic.validateUserInput() text (see
+  // node_modules/hap-nodejs/dist/lib/Characteristic.js), raised when the
+  // real handleGetRequest() pipeline validates a get-handler's returned
+  // value against the characteristic's declared min/maxValue. These tests
+  // drive that real pipeline (not a hand-rolled range check) and listen for
+  // hap-nodejs's own 'characteristic-warning' event, the same event
+  // Homebridge surfaces as the logged warning.
+  function collectWarnings(characteristic: Characteristic): string[] {
+    const warnings: string[] = [];
+    characteristic.on('characteristic-warning', (_type: string, message: string) => warnings.push(message));
+    return warnings;
+  }
+
+  it('LockTargetState never emits a HAP warning before the first status poll (the reported bug)', async () => {
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+    const targetChar = lock.getCharacteristic(Characteristic.LockTargetState);
+    const warnings = collectWarnings(targetChar);
+
+    const value = await targetChar.handleGetRequest();
+
+    expect(warnings).toEqual([]);
+    // LockTargetState's HAP-declared range is strictly [0, 1] (UNSECURED/SECURED) —
+    // it has no UNKNOWN value, unlike LockCurrentState.
+    expect(value).toBeGreaterThanOrEqual(0);
+    expect(value).toBeLessThanOrEqual(1);
+    expect(value).toBe(Characteristic.LockTargetState.SECURED);
+  });
+
+  it('LockCurrentState correctly reports UNKNOWN before the first status poll — valid for LockCurrentState, unlike LockTargetState', async () => {
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+    const currentChar = lock.getCharacteristic(Characteristic.LockCurrentState);
+    const warnings = collectWarnings(currentChar);
+
+    const value = await currentChar.handleGetRequest();
+
+    expect(warnings).toEqual([]);
+    expect(value).toBe(Characteristic.LockCurrentState.UNKNOWN);
+  });
+
+  it('reports SECURED for both Current and Target state when Honda reports doorsLocked=true, with no HAP warnings', async () => {
+    const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+    accessory.applyStatus(evStatus({ doorsLocked: true }));
+
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+    const currentChar = lock.getCharacteristic(Characteristic.LockCurrentState);
+    const targetChar = lock.getCharacteristic(Characteristic.LockTargetState);
+    const warnings = [...collectWarnings(currentChar), ...collectWarnings(targetChar)];
+
+    expect(await currentChar.handleGetRequest()).toBe(Characteristic.LockCurrentState.SECURED);
+    expect(await targetChar.handleGetRequest()).toBe(Characteristic.LockTargetState.SECURED);
+    expect(warnings).toEqual([]);
+  });
+
+  it('reports UNSECURED for both Current and Target state when Honda reports doorsLocked=false, with no HAP warnings', async () => {
+    const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+    accessory.applyStatus(evStatus({ doorsLocked: false }));
+
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+    const currentChar = lock.getCharacteristic(Characteristic.LockCurrentState);
+    const targetChar = lock.getCharacteristic(Characteristic.LockTargetState);
+    const warnings = [...collectWarnings(currentChar), ...collectWarnings(targetChar)];
+
+    expect(await currentChar.handleGetRequest()).toBe(Characteristic.LockCurrentState.UNSECURED);
+    expect(await targetChar.handleGetRequest()).toBe(Characteristic.LockTargetState.UNSECURED);
+    expect(warnings).toEqual([]);
+  });
+
+  it('keeps LockTargetState in sync with reality on every poll, not just after a HomeKit-initiated command', () => {
+    const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient());
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+
+    accessory.applyStatus(evStatus({ doorsLocked: true }));
+    expect(lock.getCharacteristic(Characteristic.LockTargetState).value).toBe(Characteristic.LockTargetState.SECURED);
+    expect(lock.getCharacteristic(Characteristic.LockCurrentState).value).toBe(Characteristic.LockCurrentState.SECURED);
+
+    // Simulate the vehicle being unlocked by some other means (key fob, the
+    // Honda app itself) and picked up on the next poll — Target should
+    // follow reality, not stay stuck on the last HomeKit-issued command.
+    accessory.applyStatus(evStatus({ doorsLocked: false }));
+    expect(lock.getCharacteristic(Characteristic.LockTargetState).value).toBe(Characteristic.LockTargetState.UNSECURED);
+    expect(lock.getCharacteristic(Characteristic.LockCurrentState).value).toBe(Characteristic.LockCurrentState.UNSECURED);
+  });
+});
+
 describe('VehicleAccessory HomeKit service naming', () => {
   // Regression coverage for the "every tile just shows the vehicle name"
   // issue: each service's Name characteristic must be a short, distinct

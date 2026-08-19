@@ -180,7 +180,7 @@ export class VehicleAccessory {
 
     lock.getCharacteristic(this.Characteristic.LockCurrentState).onGet(() => this.lockCurrentState());
     lock.getCharacteristic(this.Characteristic.LockTargetState)
-      .onGet(() => this.lockCurrentState())
+      .onGet(() => this.lockTargetState())
       .onSet(async (value) => {
         if (!this.vehicle.capabilities.has('remoteLock')) {
           throw this.notSupportedError();
@@ -204,6 +204,11 @@ export class VehicleAccessory {
     this.service.lock = lock;
   }
 
+  /**
+   * LockCurrentState has a 4th valid value, UNKNOWN (3), specifically for
+   * "we don't yet know the real state" — used here before the first
+   * successful dashboard poll.
+   */
   private lockCurrentState(): number {
     if (!this.lastStatus) {
       return this.Characteristic.LockCurrentState.UNKNOWN;
@@ -211,6 +216,26 @@ export class VehicleAccessory {
     return this.lastStatus.doorsLocked
       ? this.Characteristic.LockCurrentState.SECURED
       : this.Characteristic.LockCurrentState.UNSECURED;
+  }
+
+  /**
+   * LockTargetState, unlike LockCurrentState, has no UNKNOWN value — HAP
+   * defines it as strictly {UNSECURED: 0, SECURED: 1} (minValue 0,
+   * maxValue 1). Reusing lockCurrentState()'s UNKNOWN (3) here — the
+   * original bug — got rejected by HomeKit with "characteristic was
+   * supplied illegal value: number 3 exceeded maximum of 1", logged the
+   * moment Home queried this characteristic before the first status poll
+   * had completed. Default to SECURED (the safer assumption for a
+   * vehicle) until real data arrives; once it has, this always mirrors
+   * the real doorsLocked state, same as lockCurrentState().
+   */
+  private lockTargetState(): number {
+    if (!this.lastStatus) {
+      return this.Characteristic.LockTargetState.SECURED;
+    }
+    return this.lastStatus.doorsLocked
+      ? this.Characteristic.LockTargetState.SECURED
+      : this.Characteristic.LockTargetState.UNSECURED;
   }
 
   private setupBatteryService(): void {
@@ -354,7 +379,14 @@ export class VehicleAccessory {
   applyStatus(status: EvStatus): void {
     this.lastStatus = status;
 
-    this.service.lock?.updateCharacteristic(this.Characteristic.LockCurrentState, this.lockCurrentState());
+    if (this.service.lock) {
+      this.service.lock.updateCharacteristic(this.Characteristic.LockCurrentState, this.lockCurrentState());
+      // Keep target in sync with reality on every poll too, not just after
+      // a HomeKit-initiated lock/unlock — otherwise if the vehicle is
+      // locked/unlocked by some other means (key fob, the Honda app
+      // itself), Home would keep showing a stale target state.
+      this.service.lock.updateCharacteristic(this.Characteristic.LockTargetState, this.lockTargetState());
+    }
 
     if (this.service.battery) {
       this.service.battery.updateCharacteristic(this.Characteristic.BatteryLevel, status.batteryLevelPercent);
