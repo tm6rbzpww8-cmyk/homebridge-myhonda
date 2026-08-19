@@ -144,6 +144,17 @@ function serviceCountsByUuidAndSubtype(platformAccessory: PlatformAccessory): Ma
   return counts;
 }
 
+/** A promise plus its resolver, exposed separately — for tests that need to control exactly when an in-flight Honda command completes. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (err: unknown) => void } {
+  let resolve!: (value: T) => void;
+  let reject!: (err: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('VehicleAccessory service setup', () => {
   it('always adds a Lock Mechanism service', () => {
     const { platformAccessory } = buildAccessory(makeVehicle(), fakeClient());
@@ -425,14 +436,6 @@ describe('VehicleAccessory lock/unlock command loop (regression for the live-har
   // LockCurrentState/LockTargetState pipeline (handleSetRequest /
   // handleGetRequest), not a hand-rolled mock.
 
-  function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-    let resolve!: (value: T) => void;
-    const promise = new Promise<T>((res) => {
-      resolve = res;
-    });
-    return { promise, resolve };
-  }
-
   it('a single HomeKit unlock tap issues exactly one Honda unlock command, and a stale poll reporting the pre-command (locked) state afterwards does not flip TargetState back or issue any further command', async () => {
     const client = fakeClient();
     const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
@@ -550,6 +553,245 @@ describe('VehicleAccessory lock/unlock command loop (regression for the live-har
     await Promise.all([first, second]);
 
     expect(client.unlockDoors).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('VehicleAccessory Climate command repetition (regression for the live-hardware "turning climate control on" x3 + timeout loop)', () => {
+  // Reported live: tapping Climate on produced three "turning climate
+  // control on" log lines nine seconds apart, followed by a string of
+  // "climate control command timed out" entries, with no further HomeKit
+  // interaction — the same fundamental problem as the Lock loop (d594a1a),
+  // but on a plain Switch: Honda's own command can legitimately take
+  // several seconds to tens of seconds (see client.ts's waitForCommand),
+  // and a HomeKit controller that doesn't see the write acknowledged
+  // quickly enough can resend it while the first is still in flight.
+  // Without de-duplication, each resend became an independent Honda API
+  // call. setupClimateSwitch() now goes through the same RemoteCommandGuard
+  // as Lock (climateGuard) instead of a bespoke fix, and applyStatus()
+  // reads Climate's On state through the same guard too, so a stale poll
+  // can't flip it back mid-command either.
+
+  it('reproduces the exact live pattern: three concurrent HomeKit "on" writes (simulating undelivered-acknowledgment retries) before the first resolves collapse into exactly one Honda startClimate call', async () => {
+    const { promise: climatePromise, resolve: resolveClimate } = deferred<CommandResult>();
+    const client = fakeClient({ startClimate: jest.fn().mockReturnValue(climatePromise) });
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const onChar = platformAccessory.getServiceById(Service.Switch, 'climate')!.getCharacteristic(Characteristic.On);
+
+    // Three writes for the same target (On=true) arrive ~9s apart on real
+    // hardware, all before the first Honda command resolves.
+    const first = onChar.handleSetRequest(true, undefined as any);
+    const second = onChar.handleSetRequest(true, undefined as any);
+    const third = onChar.handleSetRequest(true, undefined as any);
+
+    resolveClimate({ outcome: 'success' });
+    await Promise.all([first, second, third]);
+
+    expect(client.startClimate).toHaveBeenCalledTimes(1);
+  });
+
+  it('a single HomeKit tap issues exactly one Honda startClimate command', async () => {
+    const client = fakeClient();
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const sw = platformAccessory.getServiceById(Service.Switch, 'climate')!;
+
+    await sw.getCharacteristic(Characteristic.On).handleSetRequest(true, undefined as any);
+
+    expect(client.startClimate).toHaveBeenCalledTimes(1);
+    expect(sw.getCharacteristic(Characteristic.On).value).toBe(true);
+  });
+
+  it('a stale poll reporting the pre-command (off) state right after a successful "on" command does not flip the switch back or issue another command', async () => {
+    const client = fakeClient();
+    const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const sw = platformAccessory.getServiceById(Service.Switch, 'climate')!;
+
+    accessory.applyStatus(evStatus({ climateActive: false }));
+    await sw.getCharacteristic(Characteristic.On).handleSetRequest(true, undefined as any);
+    expect(sw.getCharacteristic(Characteristic.On).value).toBe(true);
+
+    // Honda's dashboard cache still reporting the pre-command state.
+    accessory.applyStatus(evStatus({ climateActive: false }));
+    accessory.applyStatus(evStatus({ climateActive: false }));
+
+    expect(sw.getCharacteristic(Characteristic.On).value).toBe(true);
+    expect(client.startClimate).toHaveBeenCalledTimes(1);
+    expect(client.stopClimate).not.toHaveBeenCalled();
+  });
+
+  it('a genuine external climate change (no prior HomeKit command) updates HomeKit and issues zero Honda commands', () => {
+    const client = fakeClient();
+    const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const sw = platformAccessory.getServiceById(Service.Switch, 'climate')!;
+
+    accessory.applyStatus(evStatus({ climateActive: false }));
+    accessory.applyStatus(evStatus({ climateActive: true }));
+
+    expect(sw.getCharacteristic(Characteristic.On).value).toBe(true);
+    expect(client.startClimate).not.toHaveBeenCalled();
+    expect(client.stopClimate).not.toHaveBeenCalled();
+  });
+
+  it('a command timeout is surfaced to HomeKit as OPERATION_TIMED_OUT and does not retry automatically or get stuck', async () => {
+    const startClimate = jest.fn()
+      .mockRejectedValueOnce(new HondaVehicleUnreachableError())
+      .mockResolvedValueOnce({ outcome: 'success' });
+    const client = fakeClient({ startClimate });
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const onChar = platformAccessory.getServiceById(Service.Switch, 'climate')!.getCharacteristic(Characteristic.On);
+
+    await expect(onChar.handleSetRequest(true, undefined as any)).rejects.toBe(HAPStatus.OPERATION_TIMED_OUT);
+    expect(startClimate).toHaveBeenCalledTimes(1);
+
+    // The failed command must not be treated as confirmed — the switch
+    // reads back whatever the last known-good state was (off, the
+    // default before any status poll), not stuck showing "on".
+    expect(onChar.value).toBe(false);
+
+    // The guard must not be left permanently locked by the failure: a
+    // fresh, later tap has to be able to try again (and this time it
+    // succeeds), proving the timeout did not retry automatically and did
+    // not wedge the control.
+    await onChar.handleSetRequest(true, undefined as any);
+    expect(startClimate).toHaveBeenCalledTimes(2);
+    expect(onChar.value).toBe(true);
+  });
+
+  it('multiple concurrent duplicate writes while a command is timing out still produce only one Honda call — no retry storm', async () => {
+    const { promise: climatePromise, reject: rejectClimate } = deferred<CommandResult>();
+    const client = fakeClient({ startClimate: jest.fn().mockReturnValue(climatePromise) });
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const onChar = platformAccessory.getServiceById(Service.Switch, 'climate')!.getCharacteristic(Characteristic.On);
+
+    const first = onChar.handleSetRequest(true, undefined as any);
+    const second = onChar.handleSetRequest(true, undefined as any);
+    const third = onChar.handleSetRequest(true, undefined as any);
+
+    rejectClimate(new HondaVehicleUnreachableError());
+    await expect(first).rejects.toBe(HAPStatus.OPERATION_TIMED_OUT);
+    await expect(second).rejects.toBe(HAPStatus.OPERATION_TIMED_OUT);
+    await expect(third).rejects.toBe(HAPStatus.OPERATION_TIMED_OUT);
+
+    expect(client.startClimate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('VehicleAccessory Charging command repetition (same guard as Climate)', () => {
+  it('a single HomeKit tap issues exactly one Honda startCharging command', async () => {
+    const client = fakeClient();
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const sw = platformAccessory.getServiceById(Service.Switch, 'charging')!;
+
+    await sw.getCharacteristic(Characteristic.On).handleSetRequest(true, undefined as any);
+
+    expect(client.startCharging).toHaveBeenCalledTimes(1);
+  });
+
+  it('repeated concurrent writes for the same target while a command is in flight produce exactly one Honda call', async () => {
+    const { promise: chargePromise, resolve: resolveCharge } = deferred<CommandResult>();
+    const client = fakeClient({ startCharging: jest.fn().mockReturnValue(chargePromise) });
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const onChar = platformAccessory.getServiceById(Service.Switch, 'charging')!.getCharacteristic(Characteristic.On);
+
+    const first = onChar.handleSetRequest(true, undefined as any);
+    const second = onChar.handleSetRequest(true, undefined as any);
+    resolveCharge({ outcome: 'success' });
+    await Promise.all([first, second]);
+
+    expect(client.startCharging).toHaveBeenCalledTimes(1);
+  });
+
+  it('a stale poll reporting the pre-command state right after a successful command does not flip the switch back or issue another command', async () => {
+    const client = fakeClient();
+    const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const sw = platformAccessory.getServiceById(Service.Switch, 'charging')!;
+
+    accessory.applyStatus(evStatus({ chargeStatus: 'stopped' }));
+    await sw.getCharacteristic(Characteristic.On).handleSetRequest(true, undefined as any);
+
+    accessory.applyStatus(evStatus({ chargeStatus: 'stopped' }));
+
+    expect(sw.getCharacteristic(Characteristic.On).value).toBe(true);
+    expect(client.startCharging).toHaveBeenCalledTimes(1);
+    expect(client.stopCharging).not.toHaveBeenCalled();
+  });
+
+  it('a genuine external charging change (no prior HomeKit command) updates HomeKit and issues zero Honda commands', () => {
+    const client = fakeClient();
+    const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const sw = platformAccessory.getServiceById(Service.Switch, 'charging')!;
+
+    accessory.applyStatus(evStatus({ chargeStatus: 'stopped' }));
+    accessory.applyStatus(evStatus({ chargeStatus: 'charging' }));
+
+    expect(sw.getCharacteristic(Characteristic.On).value).toBe(true);
+    expect(client.startCharging).not.toHaveBeenCalled();
+    expect(client.stopCharging).not.toHaveBeenCalled();
+  });
+
+  it('a command timeout does not retry automatically and does not get stuck', async () => {
+    const startCharging = jest.fn()
+      .mockRejectedValueOnce(new HondaVehicleUnreachableError())
+      .mockResolvedValueOnce({ outcome: 'success' });
+    const client = fakeClient({ startCharging });
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const onChar = platformAccessory.getServiceById(Service.Switch, 'charging')!.getCharacteristic(Characteristic.On);
+
+    await expect(onChar.handleSetRequest(true, undefined as any)).rejects.toBe(HAPStatus.OPERATION_TIMED_OUT);
+    expect(startCharging).toHaveBeenCalledTimes(1);
+
+    await onChar.handleSetRequest(true, undefined as any);
+    expect(startCharging).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('VehicleAccessory Horn/Find My Car command repetition (same guard, momentary action)', () => {
+  it('a single HomeKit trigger issues exactly one Honda honkAndFlash command', async () => {
+    const client = fakeClient();
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const sw = platformAccessory.getServiceById(Service.Switch, 'horn')!;
+
+    await sw.getCharacteristic(Characteristic.On).handleSetRequest(true, undefined as any);
+
+    expect(client.honkAndFlash).toHaveBeenCalledTimes(1);
+  });
+
+  it('repeated concurrent triggers while a honk command is in flight produce exactly one Honda call, not one honk per retry', async () => {
+    const { promise: hornPromise, resolve: resolveHorn } = deferred<CommandResult>();
+    const client = fakeClient({ honkAndFlash: jest.fn().mockReturnValue(hornPromise) });
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const onChar = platformAccessory.getServiceById(Service.Switch, 'horn')!.getCharacteristic(Characteristic.On);
+
+    const first = onChar.handleSetRequest(true, undefined as any);
+    const second = onChar.handleSetRequest(true, undefined as any);
+    const third = onChar.handleSetRequest(true, undefined as any);
+
+    resolveHorn({ outcome: 'success' });
+    await Promise.all([first, second, third]);
+
+    expect(client.honkAndFlash).toHaveBeenCalledTimes(1);
+  });
+
+  it('a command timeout does not retry automatically, still resets the switch to off, and does not get stuck', async () => {
+    jest.useFakeTimers();
+    try {
+      const honkAndFlash = jest.fn()
+        .mockRejectedValueOnce(new HondaVehicleUnreachableError())
+        .mockResolvedValueOnce({ outcome: 'success' });
+      const client = fakeClient({ honkAndFlash });
+      const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+      const onChar = platformAccessory.getServiceById(Service.Switch, 'horn')!.getCharacteristic(Characteristic.On);
+
+      await expect(onChar.handleSetRequest(true, undefined as any)).rejects.toBe(HAPStatus.OPERATION_TIMED_OUT);
+      expect(honkAndFlash).toHaveBeenCalledTimes(1);
+
+      jest.advanceTimersByTime(1500);
+      expect(onChar.value).toBe(false);
+
+      await onChar.handleSetRequest(true, undefined as any);
+      expect(honkAndFlash).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

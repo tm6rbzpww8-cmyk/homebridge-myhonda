@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+- Fixed the same command-repetition problem found on the Doors lock reappearing on Climate: tapping
+  Climate on could produce three "turning climate control on" commands seconds apart, followed by a
+  string of timeouts. Root cause: a HomeKit controller that doesn't see a write acknowledged quickly
+  enough — Honda's own commands can legitimately take several seconds to tens of seconds — can resend
+  the same write while the first is still in flight; without de-duplication, each resend became an
+  independent Honda API call, and a stale dashboard-cache poll landing mid-command could flip the
+  switch back and forth the same way LockTargetState previously did. Rather than a second isolated
+  patch, extracted the fix into a reusable `RemoteCommandGuard` (`src/accessories/remoteCommandGuard.ts`)
+  implementing one request lifecycle — send one Honda command, mark it in flight, wait for the result,
+  update HomeKit, clear in-flight — and applied it uniformly to every writable control: Doors
+  (lock/unlock), Climate, Charging, and Horn/Find My Car. A duplicate/retried write for the same
+  target while a command is in flight now reuses that command's outcome instead of dispatching a
+  second one; a command timeout is surfaced to HomeKit as a normal error and never retried
+  automatically; and a status poll can never be mistaken for a new HomeKit command. No authentication,
+  API, encryption, or configuration changes.
 - Fixed a safety-critical bug found on real hardware: tapping "unlock" in the Home app could be
   followed by the plugin repeatedly alternating "Unlocking doors" / "Locking doors" commands to the
   vehicle every few seconds, with no further HomeKit interaction. Root cause: Honda's dashboard
