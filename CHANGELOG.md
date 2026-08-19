@@ -4,6 +4,29 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+- Fixed a safety-critical bug found on real hardware: tapping "unlock" in the Home app could be
+  followed by the plugin repeatedly alternating "Unlocking doors" / "Locking doors" commands to the
+  vehicle every few seconds, with no further HomeKit interaction. Root cause: Honda's dashboard
+  cache (read by routine status polling) is a separate, slower-to-update path than a command's own
+  completion confirmation, and can lag a just-completed lock/unlock command by several seconds to
+  tens of seconds. The plugin previously had no concept of "desired state" distinct from "last
+  polled state," so a poll landing in that lag window read back the pre-command state and pushed it
+  into LockTargetState as an apparent new value — which a HomeKit controller can treat as an
+  external contradiction requiring correction, re-issuing the opposite command. The plugin now
+  tracks the lock state it last confirmed via a HomeKit-issued command separately from whatever
+  polling reports, and keeps trusting that confirmed outcome for two minutes before falling back to
+  polled data — long enough to ride out Honda's cache lag, short enough that a genuine external
+  change (physical key, the Honda app) is still detected. A duplicate/retried HomeKit write for the
+  same target while a command is already in flight now reuses that command's outcome instead of
+  dispatching a second one. No authentication, API, encryption, or configuration changes.
+- Investigated a report of the Horn/"Find My Car" switch being absent from a real Honda e's HomeKit
+  accessory: confirmed (with a live Node.js + hap-nodejs construction, not just source reading) that
+  the switch is registered identically to the Climate and Charging switches, which the same report
+  confirmed do appear — the code path is correct. Its absence in that case is expected behaviour:
+  every remote-command service is gated on Honda's own per-vehicle capability flags, so it will not
+  appear unless Honda reports the `telematicsRemoteHorn` capability as active for that vehicle.
+  There is no separate "Lights" control — flashing the lights is bundled into the same "Find My
+  Car" command as the horn, mirroring Honda's own remote-command API.
 - Fixed a crash on every Homebridge restart: `Cannot add a Service with the same UUID
   '00000049-0000-1000-8000-0026BB765291' and subtype 'charging' as another Service in this
   Accessory.` Homebridge restores cached accessories (with their services already attached)

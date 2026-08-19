@@ -63,6 +63,28 @@ export interface VehicleAccessoryOptions {
 const LOW_BATTERY_THRESHOLD_PERCENT = 20;
 const HORN_SWITCH_RESET_DELAY_MS = 1000;
 
+/**
+ * How long after a HomeKit-issued lock/unlock command completes we keep
+ * trusting that confirmed outcome over a status poll that reports the
+ * pre-command state, before falling back to whatever polling reports.
+ *
+ * Honda's dashboard cache (read by routine polling, see client.ts's
+ * getDashboard) is a separate read path from the command-completion
+ * confirmation itself (see waitForCommand) and can lag behind a just-
+ * completed command by several seconds to tens of seconds. Without this
+ * window, a poll landing in that lag reports the pre-command state as a
+ * "new" LockTargetState value; real HomeKit controllers can treat an
+ * unsolicited Target-state change like that as needing correction and
+ * re-issue the opposite SET command — which this plugin would (correctly,
+ * from its own point of view) carry out as a genuine new command, producing
+ * a self-sustaining lock/unlock loop with no further HomeKit tap involved.
+ * Bounding the window (rather than trusting the desired state forever)
+ * still lets a later, genuine external change — physical key, the Honda
+ * app — be detected once enough time has passed for a fresh poll to be
+ * credible.
+ */
+const LOCK_STATE_SETTLE_MS = 2 * 60_000;
+
 function resolveOptions(base: VehicleAccessoryOptions, override?: VehicleOverrideConfig): VehicleAccessoryOptions {
   if (!override) {
     return base;
@@ -91,6 +113,23 @@ export class VehicleAccessory {
   private readonly options: VehicleAccessoryOptions;
   private readonly isElectric: boolean;
   private lastStatus?: EvStatus;
+
+  /**
+   * The lock state we last confirmed via a HomeKit-issued command (distinct
+   * from `lastStatus.doorsLocked`, whatever Honda's polling most recently
+   * reported) and when we confirmed it — see `effectiveDoorsLocked()` and
+   * `LOCK_STATE_SETTLE_MS`.
+   */
+  private desiredLocked?: boolean;
+  private desiredLockedAt = 0;
+
+  /**
+   * The lock/unlock command currently being sent to Honda, if any. Lets a
+   * duplicate HomeKit write for the same target (e.g. a retried HAP write
+   * for what was really a single tap) reuse the in-flight command's outcome
+   * instead of dispatching a second Honda command for it.
+   */
+  private lockCommand?: { targetLocked: boolean; promise: Promise<void> };
 
   constructor(
     private readonly api: API,
@@ -186,22 +225,73 @@ export class VehicleAccessory {
           throw this.notSupportedError();
         }
         const targetLocked = value === this.Characteristic.LockTargetState.SECURED;
-        this.log.info('%s: %s doors', this.logLabel, targetLocked ? 'Locking' : 'Unlocking');
+
+        // A single HomeKit tap must produce exactly one Honda command. If a
+        // command for this same target is already in flight — e.g. a
+        // duplicate write for the same tap retried at the HAP/controller
+        // level — reuse its outcome instead of dispatching a second one.
+        if (this.lockCommand?.targetLocked === targetLocked) {
+          return this.lockCommand.promise;
+        }
+
+        const promise = this.runLockCommand(lock, targetLocked);
+        this.lockCommand = { targetLocked, promise };
         try {
-          const result = targetLocked
-            ? await this.client.lockDoors(this.vin, this.vehicle)
-            : await this.client.unlockDoors(this.vin, this.vehicle);
-          this.assertCommandOk(result);
-          lock.updateCharacteristic(
-            this.Characteristic.LockCurrentState,
-            targetLocked ? this.Characteristic.LockCurrentState.SECURED : this.Characteristic.LockCurrentState.UNSECURED,
-          );
-        } catch (err) {
-          this.handleCommandError(err, 'lock/unlock');
+          await promise;
+        } finally {
+          if (this.lockCommand?.promise === promise) {
+            this.lockCommand = undefined;
+          }
         }
       });
 
     this.service.lock = lock;
+  }
+
+  private async runLockCommand(lock: Service, targetLocked: boolean): Promise<void> {
+    this.log.info('%s: %s doors', this.logLabel, targetLocked ? 'Locking' : 'Unlocking');
+    try {
+      const result = targetLocked
+        ? await this.client.lockDoors(this.vin, this.vehicle)
+        : await this.client.unlockDoors(this.vin, this.vehicle);
+      this.assertCommandOk(result);
+
+      // Record this as the desired/confirmed state so a status poll that
+      // still reads Honda's pre-command cached data doesn't get read back
+      // as an external contradiction — see LOCK_STATE_SETTLE_MS.
+      this.desiredLocked = targetLocked;
+      this.desiredLockedAt = Date.now();
+
+      lock.updateCharacteristic(
+        this.Characteristic.LockCurrentState,
+        targetLocked ? this.Characteristic.LockCurrentState.SECURED : this.Characteristic.LockCurrentState.UNSECURED,
+      );
+      lock.updateCharacteristic(
+        this.Characteristic.LockTargetState,
+        targetLocked ? this.Characteristic.LockTargetState.SECURED : this.Characteristic.LockTargetState.UNSECURED,
+      );
+    } catch (err) {
+      this.handleCommandError(err, 'lock/unlock');
+    }
+  }
+
+  /**
+   * The door-lock state to treat as authoritative for LockCurrentState and
+   * LockTargetState: normally whatever Honda's polling last reported,
+   * except for a bounded window right after we ourselves confirmed a
+   * lock/unlock command, during which we keep trusting that confirmed
+   * outcome instead — see LOCK_STATE_SETTLE_MS for why.
+   */
+  private effectiveDoorsLocked(): boolean | undefined {
+    if (
+      this.lastStatus &&
+      this.desiredLocked !== undefined &&
+      this.desiredLocked !== this.lastStatus.doorsLocked &&
+      Date.now() - this.desiredLockedAt < LOCK_STATE_SETTLE_MS
+    ) {
+      return this.desiredLocked;
+    }
+    return this.lastStatus?.doorsLocked;
   }
 
   /**
@@ -210,10 +300,11 @@ export class VehicleAccessory {
    * successful dashboard poll.
    */
   private lockCurrentState(): number {
-    if (!this.lastStatus) {
+    const locked = this.effectiveDoorsLocked();
+    if (locked === undefined) {
       return this.Characteristic.LockCurrentState.UNKNOWN;
     }
-    return this.lastStatus.doorsLocked
+    return locked
       ? this.Characteristic.LockCurrentState.SECURED
       : this.Characteristic.LockCurrentState.UNSECURED;
   }
@@ -230,10 +321,11 @@ export class VehicleAccessory {
    * the real doorsLocked state, same as lockCurrentState().
    */
   private lockTargetState(): number {
-    if (!this.lastStatus) {
+    const locked = this.effectiveDoorsLocked();
+    if (locked === undefined) {
       return this.Characteristic.LockTargetState.SECURED;
     }
-    return this.lastStatus.doorsLocked
+    return locked
       ? this.Characteristic.LockTargetState.SECURED
       : this.Characteristic.LockTargetState.UNSECURED;
   }

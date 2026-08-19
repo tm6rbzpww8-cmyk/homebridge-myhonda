@@ -170,6 +170,28 @@ describe('VehicleAccessory service setup', () => {
     expect(incapable.platformAccessory.getServiceById(Service.Switch, 'climate')).toBeUndefined();
   });
 
+  it('only adds the horn ("Find My Car") switch when the vehicle reports the remoteHorn capability, and it is a real registered Service when it does', () => {
+    // Regression coverage: reported live that Horn/Find My Car was absent
+    // from a real Honda e's HomeKit accessory. setupHornSwitch() is gated
+    // identically to setupClimateSwitch()/setupChargeSwitch() (both of
+    // which the same report confirmed *do* show up), so this proves the
+    // gating and registration code itself is correct — confirming the
+    // service genuinely exists on the PlatformAccessory (not merely
+    // assumed hidden by the Home app) when Honda reports the capability,
+    // and is genuinely and deliberately absent (not silently dropped by a
+    // bug) when Honda does not report it.
+    const capable = buildAccessory(makeVehicle({}, ['telematicsRemoteHorn']), fakeClient());
+    const incapable = buildAccessory(makeVehicle({ vin: 'VIN456' }, []), fakeClient());
+
+    const hornService = capable.platformAccessory.getServiceById(Service.Switch, 'horn');
+    expect(hornService).toBeDefined();
+    expect(hornService).toBeInstanceOf(Service);
+    expect(capable.platformAccessory.services).toContain(hornService);
+    expect(hornService!.getCharacteristic(Characteristic.Name).value).toBe('Find My Car');
+
+    expect(incapable.platformAccessory.getServiceById(Service.Switch, 'horn')).toBeUndefined();
+  });
+
   it('respects enableChargeSwitch/enableHornSwitch/enablePresenceSensor options', () => {
     const options: VehicleAccessoryOptions = { ...FULL_OPTIONS, enableChargeSwitch: false, enableHornSwitch: false, enablePresenceSensor: false };
     const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), fakeClient(), options);
@@ -381,6 +403,153 @@ describe('VehicleAccessory Lock Current/Target State mapping (regression for "ex
     accessory.applyStatus(evStatus({ doorsLocked: false }));
     expect(lock.getCharacteristic(Characteristic.LockTargetState).value).toBe(Characteristic.LockTargetState.UNSECURED);
     expect(lock.getCharacteristic(Characteristic.LockCurrentState).value).toBe(Characteristic.LockCurrentState.UNSECURED);
+  });
+});
+
+describe('VehicleAccessory lock/unlock command loop (regression for the live-hardware "Locking/Unlocking" oscillation)', () => {
+  // Reported live: tapping "unlock" in Home successfully unlocked the car,
+  // then the plugin immediately entered a loop of alternating "Unlocking
+  // doors" / "Locking doors" commands every few seconds. Root cause: Honda's
+  // dashboard cache (read by routine polling, client.ts's getDashboard) is a
+  // separate read path from a command's own completion confirmation
+  // (waitForCommand) and can lag behind a just-completed command by several
+  // seconds to tens of seconds. Before this fix, applyStatus() blindly
+  // mirrored whatever that (possibly stale) poll reported into
+  // LockTargetState — so a poll landing in that lag window pushed the
+  // pre-command state back out as a "new" target value. A real HomeKit
+  // controller can read that unsolicited contradiction as needing
+  // correction and re-issue the opposite SET command, which the plugin
+  // would faithfully execute as a genuine new Honda command — an
+  // externally-driven but self-sustaining oscillation with no further
+  // HomeKit tap involved. These tests drive the real LockMechanism/
+  // LockCurrentState/LockTargetState pipeline (handleSetRequest /
+  // handleGetRequest), not a hand-rolled mock.
+
+  function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
+
+  it('a single HomeKit unlock tap issues exactly one Honda unlock command, and a stale poll reporting the pre-command (locked) state afterwards does not flip TargetState back or issue any further command', async () => {
+    const client = fakeClient();
+    const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+
+    accessory.applyStatus(evStatus({ doorsLocked: true }));
+    expect(lock.getCharacteristic(Characteristic.LockTargetState).value).toBe(Characteristic.LockTargetState.SECURED);
+
+    await lock.getCharacteristic(Characteristic.LockTargetState)
+      .handleSetRequest(Characteristic.LockTargetState.UNSECURED, undefined as any);
+    expect(client.unlockDoors).toHaveBeenCalledTimes(1);
+    expect(lock.getCharacteristic(Characteristic.LockTargetState).value).toBe(Characteristic.LockTargetState.UNSECURED);
+    expect(lock.getCharacteristic(Characteristic.LockCurrentState).value).toBe(Characteristic.LockCurrentState.UNSECURED);
+
+    // A status poll landing right after the command, still reading Honda's
+    // stale pre-command cache (doorsLocked: true) — this is the exact
+    // condition that used to flip TargetState back to SECURED and, on real
+    // hardware, trigger the loop.
+    accessory.applyStatus(evStatus({ doorsLocked: true }));
+    expect(lock.getCharacteristic(Characteristic.LockTargetState).value).toBe(Characteristic.LockTargetState.UNSECURED);
+    expect(lock.getCharacteristic(Characteristic.LockCurrentState).value).toBe(Characteristic.LockCurrentState.UNSECURED);
+
+    // Repeated stale polls must not budge it either.
+    accessory.applyStatus(evStatus({ doorsLocked: true }));
+    accessory.applyStatus(evStatus({ doorsLocked: true }));
+    expect(lock.getCharacteristic(Characteristic.LockTargetState).value).toBe(Characteristic.LockTargetState.UNSECURED);
+
+    expect(client.unlockDoors).toHaveBeenCalledTimes(1);
+    expect(client.lockDoors).not.toHaveBeenCalled();
+  });
+
+  it('a single HomeKit lock tap issues exactly one Honda lock command, and stale polls reporting the pre-command (unlocked) state afterwards do not flip TargetState back or issue any further command', async () => {
+    const client = fakeClient();
+    const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+
+    accessory.applyStatus(evStatus({ doorsLocked: false }));
+    expect(lock.getCharacteristic(Characteristic.LockTargetState).value).toBe(Characteristic.LockTargetState.UNSECURED);
+
+    await lock.getCharacteristic(Characteristic.LockTargetState)
+      .handleSetRequest(Characteristic.LockTargetState.SECURED, undefined as any);
+    expect(client.lockDoors).toHaveBeenCalledTimes(1);
+
+    accessory.applyStatus(evStatus({ doorsLocked: false }));
+    accessory.applyStatus(evStatus({ doorsLocked: false }));
+    expect(lock.getCharacteristic(Characteristic.LockTargetState).value).toBe(Characteristic.LockTargetState.SECURED);
+    expect(lock.getCharacteristic(Characteristic.LockCurrentState).value).toBe(Characteristic.LockCurrentState.SECURED);
+
+    expect(client.lockDoors).toHaveBeenCalledTimes(1);
+    expect(client.unlockDoors).not.toHaveBeenCalled();
+  });
+
+  it('an external state change (no prior HomeKit command) is reflected in HomeKit immediately and issues zero Honda commands', () => {
+    const client = fakeClient();
+    const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+
+    accessory.applyStatus(evStatus({ doorsLocked: true }));
+    expect(lock.getCharacteristic(Characteristic.LockTargetState).value).toBe(Characteristic.LockTargetState.SECURED);
+
+    // The vehicle is unlocked externally (key fob, the Honda app) and the
+    // next poll picks it up — no HomeKit command was ever issued.
+    accessory.applyStatus(evStatus({ doorsLocked: false }));
+
+    expect(lock.getCharacteristic(Characteristic.LockCurrentState).value).toBe(Characteristic.LockCurrentState.UNSECURED);
+    expect(lock.getCharacteristic(Characteristic.LockTargetState).value).toBe(Characteristic.LockTargetState.UNSECURED);
+    expect(client.lockDoors).not.toHaveBeenCalled();
+    expect(client.unlockDoors).not.toHaveBeenCalled();
+  });
+
+  it('a genuine external change is still picked up once the settle window has passed, so physical-key/Honda-app changes are not permanently masked', async () => {
+    const client = fakeClient();
+    const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+
+    accessory.applyStatus(evStatus({ doorsLocked: true }));
+    await lock.getCharacteristic(Characteristic.LockTargetState)
+      .handleSetRequest(Characteristic.LockTargetState.UNSECURED, undefined as any);
+    expect(client.unlockDoors).toHaveBeenCalledTimes(1);
+
+    // Simulate enough real time passing (well past LOCK_STATE_SETTLE_MS)
+    // that Honda's dashboard cache would credibly have caught up — a poll
+    // reporting "locked" at this point is a real external re-lock, not
+    // stale cache lag, and must be trusted.
+    const realNow = Date.now();
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(realNow + 5 * 60_000);
+    try {
+      accessory.applyStatus(evStatus({ doorsLocked: true }));
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(lock.getCharacteristic(Characteristic.LockCurrentState).value).toBe(Characteristic.LockCurrentState.SECURED);
+    expect(lock.getCharacteristic(Characteristic.LockTargetState).value).toBe(Characteristic.LockTargetState.SECURED);
+    // Still exactly one command overall — the settle-window expiry itself
+    // must never issue a Honda command; it only changes which state
+    // applyStatus() trusts.
+    expect(client.unlockDoors).toHaveBeenCalledTimes(1);
+    expect(client.lockDoors).not.toHaveBeenCalled();
+  });
+
+  it('a duplicate/retried HomeKit write for the same target while a command is already in flight reuses its outcome instead of issuing a second Honda command', async () => {
+    const { promise: unlockPromise, resolve: resolveUnlock } = deferred<CommandResult>();
+    const client = fakeClient({ unlockDoors: jest.fn().mockReturnValue(unlockPromise) });
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+    const targetChar = lock.getCharacteristic(Characteristic.LockTargetState);
+
+    // Two writes for the same target arrive before the first Honda command
+    // has resolved — e.g. a retried HAP write for what was really one tap.
+    const first = targetChar.handleSetRequest(Characteristic.LockTargetState.UNSECURED, undefined as any);
+    const second = targetChar.handleSetRequest(Characteristic.LockTargetState.UNSECURED, undefined as any);
+
+    resolveUnlock({ outcome: 'success' });
+    await Promise.all([first, second]);
+
+    expect(client.unlockDoors).toHaveBeenCalledTimes(1);
   });
 });
 
