@@ -33,11 +33,12 @@
     "README.md"
   ],
   "engines": {
-    "node": "^18.20.4 || ^20.18.1 || ^22.10.0",
+    "node": "^18.20.4 || ^20.18.1 || ^22.10.0 || ^24.0.0",
     "homebridge": "^1.8.0 || ^2.0.0-beta.0"
   },
   "scripts": {
     "build": "rimraf dist && tsc",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run lint && npm run build && npm test",
     "watch": "tsc --watch",
     "lint": "eslint src test --max-warnings=0",
