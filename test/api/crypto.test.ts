@@ -1,36 +1,126 @@
 import * as crypto from 'crypto';
-import { DeviceKey, encryptRequest } from '../../src/api/crypto';
+import { DeviceKey, encryptRequest, rsaEncryptBase64String } from '../../src/api/crypto';
+
+/**
+ * Reproduces the reference client's (pymyhondaplus) exact
+ * `_encrypt_with_server_public_key` + base64-decode round trip in Node,
+ * so tests can assert on it without a live Python process:
+ *
+ *   Python: server_key.encrypt(payload.encode("utf-8"), PKCS1v15())
+ *           where payload = base64.b64encode(raw_bytes).decode()
+ *
+ * i.e. RSA-decrypting a correctly-built envelope field must yield the
+ * *base64 text* of the original bytes, not the bytes themselves — and
+ * base64-decoding that text must recover the original bytes exactly.
+ * This is the structural invariant the reported "Failed to decrypt
+ * request" bug violated (this plugin was RSA-encrypting the raw bytes
+ * directly, skipping the base64-string step entirely).
+ */
+function decryptToOriginalBytes(encryptedBase64: string, privateKey: crypto.KeyObject): Buffer {
+  const rsaPlaintext = crypto.privateDecrypt(
+    { key: privateKey, padding: crypto.constants.RSA_PKCS1_PADDING },
+    Buffer.from(encryptedBase64, 'base64'),
+  );
+  const asText = rsaPlaintext.toString('utf8');
+  // Must be exactly the base64 alphabet (+ padding), never raw binary —
+  // raw binary decrypted straight to UTF-8 would almost certainly contain
+  // non-base64 characters (or fail to even form valid UTF-8) for a random
+  // 16/32-byte key, unlike a genuine base64 string of it.
+  expect(asText).toMatch(/^[A-Za-z0-9+/]+=*$/);
+  return Buffer.from(asText, 'base64');
+}
+
+describe('rsaEncryptBase64String (regression for "Failed to decrypt request")', () => {
+  it('RSA-encrypts the base64 STRING form of the input, matching the reference exactly — not the raw bytes', () => {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const originalIv = crypto.randomBytes(16);
+
+    const encrypted = rsaEncryptBase64String(originalIv, publicKey);
+    const recovered = decryptToOriginalBytes(encrypted, privateKey);
+
+    expect(recovered).toEqual(originalIv);
+  });
+
+  it('works for a 32-byte AES key the same way', () => {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const originalKey = crypto.randomBytes(32);
+
+    const encrypted = rsaEncryptBase64String(originalKey, publicKey);
+    const recovered = decryptToOriginalBytes(encrypted, privateKey);
+
+    expect(recovered).toEqual(originalKey);
+  });
+
+  it('reproduces the exact failure mode of the original bug for comparison: raw-byte RSA encryption does NOT decrypt to valid base64', () => {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const originalIv = crypto.randomBytes(16);
+
+    // This is what the plugin used to do: RSA-encrypt the raw bytes directly.
+    const buggyEncrypted = crypto.publicEncrypt(
+      { key: publicKey, padding: crypto.constants.RSA_PKCS1_PADDING },
+      originalIv,
+    ).toString('base64');
+
+    const rsaPlaintext = crypto.privateDecrypt(
+      { key: privateKey, padding: crypto.constants.RSA_PKCS1_PADDING },
+      Buffer.from(buggyEncrypted, 'base64'),
+    );
+    // Honda's server treats this RSA-decrypted plaintext as base64 text
+    // and tries to base64-decode it — for genuinely random 16 raw bytes,
+    // interpreting them as UTF-8 either fails outright or (on the rare
+    // input where it doesn't) does not decode to the correct original
+    // bytes. Either way it is not the correct 16-byte IV, demonstrating
+    // why Honda reported "Failed to decrypt request".
+    let recoveredMatchesOriginal = false;
+    try {
+      const asText = rsaPlaintext.toString('utf8');
+      recoveredMatchesOriginal = Buffer.from(asText, 'base64').equals(originalIv);
+    } catch {
+      recoveredMatchesOriginal = false;
+    }
+    expect(recoveredMatchesOriginal).toBe(false);
+  });
+});
 
 describe('encryptRequest', () => {
-  it('produces an envelope decryptable with the matching RSA private key', () => {
-    // Generate our own keypair standing in for Honda's server key so we can
-    // verify the AES key/IV really do decrypt with RSA, without needing the
-    // real (secret) server private key.
-    const serverKeyPair = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  it('produces an envelope whose RSA-encrypted fields decrypt to the base64 string of the real AES key/IV (via rsaEncryptBase64String)', () => {
+    // encryptRequest always uses Honda's real (hardcoded) public key, so it
+    // can't be decrypted here directly — but rsaEncryptBase64String is the
+    // exact function it calls internally for both encryptedOneTimeKey and
+    // encryptedOneTimeSalt (see src/api/crypto.ts), so exercising that
+    // function directly against a local test keypair (above) verifies the
+    // real code path encryptRequest uses, not a reimplementation of it.
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const aesKey = crypto.randomBytes(32);
+    const iv = crypto.randomBytes(16);
 
-    const encryptWith = (publicKey: crypto.KeyObject, payload: unknown) => {
+    const encryptedOneTimeKey = rsaEncryptBase64String(aesKey, publicKey);
+    const encryptedOneTimeSalt = rsaEncryptBase64String(iv, publicKey);
+
+    expect(decryptToOriginalBytes(encryptedOneTimeKey, privateKey)).toEqual(aesKey);
+    expect(decryptToOriginalBytes(encryptedOneTimeSalt, privateKey)).toEqual(iv);
+  });
+
+  it('produces an encryptedPayload that AES-decrypts with the real key/IV recovered the same way', () => {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+
+    const encryptWith = (pubKey: crypto.KeyObject, payload: unknown) => {
       const plaintext = Buffer.from(JSON.stringify(payload), 'utf8');
       const aesKey = crypto.randomBytes(32);
       const iv = crypto.randomBytes(16);
       const cipher = crypto.createCipheriv('aes-256-cbc', aesKey, iv);
       const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
       return {
-        encryptedOneTimeKey: crypto.publicEncrypt({ key: publicKey, padding: crypto.constants.RSA_PKCS1_PADDING }, aesKey).toString('base64'),
-        encryptedOneTimeSalt: crypto.publicEncrypt({ key: publicKey, padding: crypto.constants.RSA_PKCS1_PADDING }, iv).toString('base64'),
+        encryptedOneTimeKey: rsaEncryptBase64String(aesKey, pubKey),
+        encryptedOneTimeSalt: rsaEncryptBase64String(iv, pubKey),
         encryptedPayload: ciphertext.toString('base64'),
       };
     };
 
-    const envelope = encryptWith(serverKeyPair.publicKey, { hello: 'world', n: 42 });
+    const envelope = encryptWith(publicKey, { hello: 'world', n: 42 });
 
-    const aesKey = crypto.privateDecrypt(
-      { key: serverKeyPair.privateKey, padding: crypto.constants.RSA_PKCS1_PADDING },
-      Buffer.from(envelope.encryptedOneTimeKey, 'base64'),
-    );
-    const iv = crypto.privateDecrypt(
-      { key: serverKeyPair.privateKey, padding: crypto.constants.RSA_PKCS1_PADDING },
-      Buffer.from(envelope.encryptedOneTimeSalt, 'base64'),
-    );
+    const aesKey = decryptToOriginalBytes(envelope.encryptedOneTimeKey, privateKey);
+    const iv = decryptToOriginalBytes(envelope.encryptedOneTimeSalt, privateKey);
     const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, iv);
     const plaintext = Buffer.concat([decipher.update(Buffer.from(envelope.encryptedPayload, 'base64')), decipher.final()]);
 

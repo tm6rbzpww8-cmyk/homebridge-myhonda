@@ -50,12 +50,35 @@ function serverPublicKey(): crypto.KeyObject {
   return crypto.createPublicKey({ key: der, format: 'der', type: 'spki' });
 }
 
-function rsaEncrypt(data: Buffer): string {
+function rsaEncrypt(data: Buffer, publicKey: crypto.KeyObject): string {
   const encrypted = crypto.publicEncrypt(
-    { key: serverPublicKey(), padding: crypto.constants.RSA_PKCS1_PADDING },
+    { key: publicKey, padding: crypto.constants.RSA_PKCS1_PADDING },
     data,
   );
   return encrypted.toString('base64');
+}
+
+/**
+ * RSA-encrypts the *base64-encoded string form* of `data`, not its raw
+ * bytes — matching the reference client's `_encrypt_with_server_public_key`,
+ * which always takes a string (`payload.encode("utf-8")`) and is called
+ * with `base64.b64encode(key).decode()` / `base64.b64encode(iv).decode()`,
+ * never the raw key/IV bytes directly. Honda's server RSA-decrypts and
+ * then base64-decodes the result to recover the actual AES key/IV; feeding
+ * it raw bytes instead (this plugin's original bug) produces plaintext
+ * that isn't valid base64 once decrypted server-side, which is why Honda
+ * responded "Failed to decrypt request" rather than any auth-specific
+ * error — the request never got past the AES layer at all.
+ *
+ * `publicKey` defaults to Honda's real server key but can be overridden —
+ * exported so tests can exercise this exact function (the one
+ * `encryptRequest` actually uses) against a locally generated test
+ * keypair, decrypt the result, and verify the "base64 string, not raw
+ * bytes" structure directly, without needing Honda's real (secret)
+ * private key.
+ */
+export function rsaEncryptBase64String(data: Buffer, publicKey: crypto.KeyObject = serverPublicKey()): string {
+  return rsaEncrypt(Buffer.from(data.toString('base64'), 'utf8'), publicKey);
 }
 
 /**
@@ -72,8 +95,8 @@ export function encryptRequest(payload: unknown): EncryptedEnvelope {
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
 
   return {
-    encryptedOneTimeKey: rsaEncrypt(aesKey),
-    encryptedOneTimeSalt: rsaEncrypt(iv),
+    encryptedOneTimeKey: rsaEncryptBase64String(aesKey),
+    encryptedOneTimeSalt: rsaEncryptBase64String(iv),
     encryptedPayload: ciphertext.toString('base64'),
     keyId: SERVER_PUBLIC_KEY_ID,
   };
