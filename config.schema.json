@@ -1,0 +1,152 @@
+{
+  "pluginAlias": "MyHonda",
+  "pluginType": "platform",
+  "singular": true,
+  "headerDisplay": "Connects Honda vehicles from your My Honda+ / Honda Connect Europe account to HomeKit. Tested on the Honda e; other Honda Connect Europe vehicles (e:Ny1, ZR-V, CR-V, Civic, HR-V, Jazz 2020+) may work but are unverified.",
+  "footerDisplay": "On first run, Honda requires this device to be verified by email. Watch the Homebridge log after saving — it will tell you when to check your inbox and paste the verification link back into this form.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "title": "Platform Name",
+        "type": "string",
+        "default": "My Honda",
+        "required": true
+      },
+      "email": {
+        "title": "My Honda+ Email",
+        "type": "string",
+        "format": "email",
+        "required": true
+      },
+      "password": {
+        "title": "My Honda+ Password",
+        "type": "string",
+        "format": "password",
+        "required": true
+      },
+      "verificationLink": {
+        "title": "Verification Link (first run only)",
+        "type": "string",
+        "description": "After saving this config for the first time, check the Homebridge log. If Honda needs to verify this device, it will email you a link — paste the full link here (do not click it first), save, and restart Homebridge. You can remove it again afterwards.",
+        "required": false
+      },
+      "locale": {
+        "title": "Locale",
+        "type": "string",
+        "default": "en-GB",
+        "description": "Language/country code used for Honda API requests, e.g. en-GB, it-IT, de-DE, fr-FR.",
+        "required": false
+      },
+      "pollIntervalSeconds": {
+        "title": "Status Poll Interval (seconds)",
+        "type": "integer",
+        "default": 300,
+        "minimum": 60,
+        "description": "How often to fetch fresh vehicle status from Honda. Minimum 60 seconds. This reads Honda's most recently cached data unless \"Wake vehicle on every poll\" is enabled.",
+        "required": false
+      },
+      "wakeVehicleOnPoll": {
+        "title": "Wake vehicle on every poll",
+        "type": "boolean",
+        "default": false,
+        "description": "If enabled, every poll asks the car itself for fresh data instead of using Honda's cache. This is slower, can take up to ~90 seconds per vehicle, and drains the 12V battery faster if polled frequently — most users should leave this off.",
+        "required": false
+      },
+      "enableClimateSwitch": {
+        "title": "Expose climate pre-conditioning switch",
+        "type": "boolean",
+        "default": true,
+        "required": false
+      },
+      "enableChargeSwitch": {
+        "title": "Expose start/stop charging switch",
+        "type": "boolean",
+        "default": true,
+        "required": false
+      },
+      "enableHornSwitch": {
+        "title": "Expose horn & lights (\"Find My Car\") switch",
+        "type": "boolean",
+        "default": true,
+        "required": false
+      },
+      "enablePresenceSensor": {
+        "title": "Expose away-from-home occupancy sensor",
+        "type": "boolean",
+        "default": true,
+        "required": false
+      },
+      "vehicles": {
+        "title": "Per-Vehicle Overrides",
+        "type": "array",
+        "description": "Optional. Override settings for a specific vehicle by VIN.",
+        "required": false,
+        "items": {
+          "type": "object",
+          "properties": {
+            "vin": {
+              "title": "VIN",
+              "type": "string",
+              "required": true
+            },
+            "name": {
+              "title": "Display Name",
+              "type": "string",
+              "required": false
+            },
+            "enableClimateSwitch": {
+              "title": "Expose climate pre-conditioning switch",
+              "type": "boolean",
+              "required": false
+            },
+            "enableChargeSwitch": {
+              "title": "Expose start/stop charging switch",
+              "type": "boolean",
+              "required": false
+            },
+            "enableHornSwitch": {
+              "title": "Expose horn & lights switch",
+              "type": "boolean",
+              "required": false
+            },
+            "enablePresenceSensor": {
+              "title": "Expose away-from-home occupancy sensor",
+              "type": "boolean",
+              "required": false
+            }
+          }
+        }
+      }
+    }
+  },
+  "layout": [
+    {
+      "type": "fieldset",
+      "title": "Account",
+      "items": ["email", "password", "verificationLink", "locale"]
+    },
+    {
+      "type": "fieldset",
+      "title": "Polling",
+      "items": ["pollIntervalSeconds", "wakeVehicleOnPoll"]
+    },
+    {
+      "type": "fieldset",
+      "title": "HomeKit Services",
+      "items": ["enableClimateSwitch", "enableChargeSwitch", "enableHornSwitch", "enablePresenceSensor"]
+    },
+    {
+      "type": "fieldset",
+      "title": "Per-Vehicle Overrides",
+      "expandable": true,
+      "items": [
+        {
+          "key": "vehicles",
+          "type": "array",
+          "items": ["vehicles[].vin", "vehicles[].name", "vehicles[].enableClimateSwitch", "vehicles[].enableChargeSwitch", "vehicles[].enableHornSwitch", "vehicles[].enablePresenceSensor"]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "name": "homebridge-myhonda",
+  "version": "1.0.0",
+  "description": "Homebridge plugin that brings your Honda vehicle (via the My Honda+ / Honda Connect Europe app) into Apple HomeKit: lock/unlock, battery & charge status, range, charging control, climate pre-conditioning, and home/away presence.",
+  "license": "MIT",
+  "author": "tm6rbzpww8-cmyk",
+  "homepage": "https://github.com/tm6rbzpww8-cmyk/homebridge-myhonda#readme",
+  "bugs": {
+    "url": "https://github.com/tm6rbzpww8-cmyk/homebridge-myhonda/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tm6rbzpww8-cmyk/homebridge-myhonda.git"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "homebridge",
+    "homekit",
+    "honda",
+    "honda-e",
+    "my honda+",
+    "myhonda",
+    "electric-vehicle",
+    "ev"
+  ],
+  "displayName": "Honda (My Honda+)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "config.schema.json",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": "^18.20.4 || ^20.18.1 || ^22.10.0",
+    "homebridge": "^1.8.0 || ^2.0.0-beta.0"
+  },
+  "scripts": {
+    "build": "rimraf dist && tsc",
+    "prepublishOnly": "npm run lint && npm run build && npm test",
+    "watch": "tsc --watch",
+    "lint": "eslint src test --max-warnings=0",
+    "lint:fix": "eslint src test --fix",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
+  },
+  "dependencies": {
+    "undici": "^6.19.8"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^20.16.10",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.1",
+    "homebridge": "^1.8.4",
+    "jest": "^29.7.0",
+    "rimraf": "^6.0.1",
+    "ts-jest": "^29.2.5",
+    "typescript": "^5.6.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
