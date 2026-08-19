@@ -1,4 +1,4 @@
-import { HondaAuth } from '../../src/api/auth';
+import { HondaAuth, quotePreservingBase64Chars } from '../../src/api/auth';
 import { DeviceKey } from '../../src/api/crypto';
 import { HttpClient, HttpResponse } from '../../src/api/httpClient';
 import { HondaAccountLockedError, HondaAuthError, HondaVerificationRequiredError } from '../../src/api/errors';
@@ -111,6 +111,51 @@ describe('HondaAuth.completeDeviceVerification', () => {
     const auth = new HondaAuth(http, DeviceKey.generate());
 
     await expect(auth.completeDeviceVerification('u@example.com', 'p', 'not-a-url')).rejects.toBeInstanceOf(HondaAuthError);
+  });
+
+  it('sends the verification key with +, /, = left unescaped, matching the reference client', async () => {
+    // The reference (pymyhondaplus) builds this URL with
+    // urllib.parse.quote(key, safe="+/="), so a base64-shaped key must
+    // reach Honda's server with '+', '/', '=' as literal characters, not
+    // percent-encoded — see src/api/auth.ts quotePreservingBase64Chars().
+    const http = fakeHttpClient({
+      'GET /auth/verify-link': { statusCode: 200, raw: '{}', body: {} },
+      'POST /auth/initiate-login': {
+        statusCode: 200,
+        raw: '{}',
+        body: { transactionId: 't', signatureChallenge: 'c' },
+      },
+      'POST /auth/complete-login': {
+        statusCode: 200,
+        raw: '{}',
+        body: { access_token: 'a', refresh_token: 'r', expires_in: 3600 },
+      },
+    });
+    const auth = new HondaAuth(http, DeviceKey.generate());
+
+    await auth.completeDeviceVerification(
+      'user@example.com',
+      'hunter2',
+      'https://mobile-api.connected.honda-eu.com/auth/verify-link?type=mfa&key=ab%2Bc%2Fd%3D%3D',
+    );
+
+    const calls = (http as any).calls as { path: string; options: any }[];
+    const verifyCall = calls.find((c) => c.path.startsWith('/auth/verify-link'));
+    expect(verifyCall?.path).toBe('/auth/verify-link?type=mfa&key=ab+c/d==&dontRedirect=true');
+  });
+});
+
+describe('quotePreservingBase64Chars', () => {
+  it('leaves the base64 alphabet (+, /, =) unescaped', () => {
+    expect(quotePreservingBase64Chars('ab+c/d==')).toBe('ab+c/d==');
+  });
+
+  it('leaves letters, digits, and _.-~ unescaped', () => {
+    expect(quotePreservingBase64Chars('abc123_.-~XYZ')).toBe('abc123_.-~XYZ');
+  });
+
+  it('percent-encodes characters outside the safe set, e.g. space and &', () => {
+    expect(quotePreservingBase64Chars('a b&c')).toBe('a%20b%26c');
   });
 });
 

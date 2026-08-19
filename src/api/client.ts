@@ -20,6 +20,7 @@ import {
   AsyncCommandAccepted,
   AsyncCommandStatusResponse,
   RawDashboardResponse,
+  RawLoginTokens,
   RawUserInfoResponse,
 } from './types';
 import {
@@ -142,6 +143,14 @@ export class HondaApiClient {
 
   async getVehicles(): Promise<Vehicle[]> {
     const info = await this.authedRequest<RawUserInfoResponse>('GET', this.userInfoPath());
+    // Honda's get-login-info response carries the account-scoped personalId
+    // used as the x-app-personal-id header on subsequent /tsp requests (it
+    // is never present in the login/refresh token response). Capture it
+    // here, the first authenticated call made after signing in.
+    if (info.personalId && info.personalId !== this.personalId) {
+      this.personalId = info.personalId;
+      this.persistTokens();
+    }
     return (info.vehiclesInfo ?? [])
       .map(parseVehicle)
       .filter((v): v is Vehicle => v !== undefined);
@@ -351,12 +360,16 @@ export class HondaApiClient {
     this.persistTokens();
   }
 
-  private storeTokens(tokens: { access_token: string; refresh_token: string; expires_in?: number; personalId?: string; personal_id?: string; userId?: string }): void {
+  private storeTokens(tokens: RawLoginTokens): void {
+    // Honda's login/complete-login response carries only access_token,
+    // refresh_token, and expires_in — no personalId or userId field. userId
+    // is derived from the access token's JWT "sub" claim (as the reference
+    // client does); personalId is only ever obtained later, from the
+    // get-login-info response (see getVehicles()).
     this.accessToken = tokens.access_token;
     this.refreshToken = tokens.refresh_token;
     this.expiresAt = Date.now() + (tokens.expires_in ?? 3599) * 1000;
-    this.personalId = tokens.personalId ?? tokens.personal_id ?? this.personalId;
-    this.userId = tokens.userId ?? this.userId ?? extractUserIdFromJwt(this.accessToken);
+    this.userId = extractUserIdFromJwt(this.accessToken);
     this.persistTokens();
   }
 

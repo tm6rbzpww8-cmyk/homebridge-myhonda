@@ -101,6 +101,42 @@ describe('HondaApiClient login + basic requests', () => {
     expect(vehicles[0].vin).toBe('VIN123');
   });
 
+  it('captures personalId from get-login-info and sends it as x-app-personal-id on later requests', async () => {
+    // The reference client (pymyhondaplus + its Home Assistant integration)
+    // never gets personalId from the login/refresh token response — it's
+    // only present on /user/get-login-info, and is required as the
+    // x-app-personal-id header on subsequent authenticated requests.
+    queueResponses({
+      'POST /auth/initiate-login': jsonResponse(200, { transactionId: 't', signatureChallenge: 'c' }),
+      'POST /auth/complete-login': jsonResponse(200, { access_token: 'a.b.c', refresh_token: 'r', expires_in: 3600 }),
+      'GET /user/get-login-info': jsonResponse(200, { personalId: 'PID-789', vehiclesInfo: [] }),
+      'GET /tsp/dashboard-latest': jsonResponse(200, { evStatus: { soc: '50' } }),
+    });
+
+    const client = new HondaApiClient({ email: 'user@example.com', password: 'p', storagePath: tempStoragePath(), log: silentLogger() });
+    await client.login();
+    await client.getVehicles();
+    await client.getDashboard('VIN123');
+
+    const dashboardCall = mockUndiciRequest.mock.calls.find(([url]: [string]) => url.includes('/tsp/dashboard-latest'));
+    expect(dashboardCall?.[1]?.headers?.['x-app-personal-id']).toBe('PID-789');
+  });
+
+  it('does not send x-app-personal-id before it has been captured', async () => {
+    queueResponses({
+      'POST /auth/initiate-login': jsonResponse(200, { transactionId: 't', signatureChallenge: 'c' }),
+      'POST /auth/complete-login': jsonResponse(200, { access_token: 'a.b.c', refresh_token: 'r', expires_in: 3600 }),
+      'GET /tsp/dashboard-latest': jsonResponse(200, { evStatus: { soc: '50' } }),
+    });
+
+    const client = new HondaApiClient({ email: 'user@example.com', password: 'p', storagePath: tempStoragePath(), log: silentLogger() });
+    await client.login();
+    await client.getDashboard('VIN123');
+
+    const dashboardCall = mockUndiciRequest.mock.calls.find(([url]: [string]) => url.includes('/tsp/dashboard-latest'));
+    expect(dashboardCall?.[1]?.headers?.['x-app-personal-id']).toBeUndefined();
+  });
+
   it('persists tokens across client instances (restoreSession)', async () => {
     const storagePath = tempStoragePath();
     queueResponses({

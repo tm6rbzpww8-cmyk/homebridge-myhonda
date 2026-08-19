@@ -13,9 +13,6 @@ export interface RawLoginTokens {
   access_token: string;
   refresh_token: string;
   expires_in?: number;
-  personalId?: string;
-  personal_id?: string;
-  userId?: string;
 }
 
 export interface InitiateLoginResponse {
@@ -109,6 +106,8 @@ export interface RawUserInfoResponse {
   firstName?: string;
   lastName?: string;
   email?: string;
+  /** Account-scoped id Honda expects back as the `x-app-personal-id` header on subsequent requests. */
+  personalId?: string;
   vehiclesInfo?: RawVehicleInfo[];
 }
 

@@ -175,7 +175,14 @@ export class HondaAuth {
       throw new HondaAuthError(`Could not parse a verification key out of the provided link: ${verificationLink}`);
     }
 
-    const url = `/auth/verify-link?type=${encodeURIComponent(type)}&key=${encodeURIComponent(key)}&dontRedirect=true`;
+    // The reference client percent-encodes the key with Python's
+    // urllib.parse.quote(key, safe="+/="), i.e. it leaves '+', '/', '=' as
+    // literal characters instead of escaping them. encodeURIComponent
+    // would escape those, producing a different (though technically
+    // equivalent once percent-decoded) query string — match the reference
+    // byte-for-byte rather than relying on Honda's server decoding both
+    // forms the same way.
+    const url = `/auth/verify-link?type=${encodeURIComponent(type)}&key=${quotePreservingBase64Chars(key)}&dontRedirect=true`;
     const verifyRes = await this.http.request(url, { method: 'GET' });
     if (verifyRes.statusCode >= 400) {
       throw new HondaAuthError(
@@ -214,6 +221,31 @@ export class HondaAuth {
     }
     throw new HondaAuthError(`Honda ${step} failed (HTTP ${statusCode})`, statusCode, body);
   }
+}
+
+// Characters Python's urllib.parse.quote() never escapes, with no `safe`
+// argument at all: ASCII letters, digits, and "_.-~".
+const PYTHON_QUOTE_ALWAYS_SAFE = /[A-Za-z0-9_.\-~]/;
+
+/**
+ * Percent-encodes `value` the way the reference client's
+ * `urllib.parse.quote(value, safe="+/=")` does: only bytes outside
+ * {A-Z a-z 0-9 _ . - ~ + / =} get escaped, everything else — including the
+ * base64 alphabet's '+', '/', and padding '=' — is left as a literal
+ * character in the URL.
+ */
+export function quotePreservingBase64Chars(value: string): string {
+  const bytes = Buffer.from(value, 'utf8');
+  let out = '';
+  for (const byte of bytes) {
+    const ch = String.fromCharCode(byte);
+    if (byte < 128 && (PYTHON_QUOTE_ALWAYS_SAFE.test(ch) || ch === '+' || ch === '/' || ch === '=')) {
+      out += ch;
+    } else {
+      out += `%${byte.toString(16).toUpperCase().padStart(2, '0')}`;
+    }
+  }
+  return out;
 }
 
 export function parseVerificationLink(link: string): { key: string; type: string } {
