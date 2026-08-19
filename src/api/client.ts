@@ -17,6 +17,7 @@ import { StoredTokens, TokenStore } from './tokenStore';
 import { EvStatus, parseEvStatus } from './dashboard';
 import { CapabilityName, parseVehicle, Vehicle } from './vehicle';
 import { redactVinInPath } from './redact';
+import { HondaClientLogger } from './logger';
 import {
   AsyncCommandAccepted,
   AsyncCommandStatusResponse,
@@ -31,12 +32,7 @@ import {
   HondaVehicleUnreachableError,
 } from './errors';
 
-export interface HondaClientLogger {
-  debug(message: string, ...args: unknown[]): void;
-  info(message: string, ...args: unknown[]): void;
-  warn(message: string, ...args: unknown[]): void;
-  error(message: string, ...args: unknown[]): void;
-}
+export type { HondaClientLogger } from './logger';
 
 export interface HondaClientConfig {
   email: string;
@@ -94,7 +90,7 @@ export class HondaApiClient {
     }
 
     this.http = new HttpClient(defaultAuthHeaders(config.deviceModel ?? DEFAULT_DEVICE_MODEL));
-    this.auth = new HondaAuth(this.http, this.deviceKey);
+    this.auth = new HondaAuth(this.http, this.deviceKey, this.log);
 
     const stored = this.tokenStore.loadTokens();
     if (stored) {

@@ -1,6 +1,11 @@
-import { HondaAuth, quotePreservingBase64Chars, toHondaLocale } from '../../src/api/auth';
+import { HondaAuth, defaultAuthHeaders, quotePreservingBase64Chars, toHondaLocale } from '../../src/api/auth';
 import { HttpClient, HttpResponse } from '../../src/api/httpClient';
 import { HondaAccountLockedError, HondaAuthError, HondaVerificationRequiredError } from '../../src/api/errors';
+import { HondaClientLogger } from '../../src/api/logger';
+
+function fakeLogger(): HondaClientLogger {
+  return { debug: jest.fn(), info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+}
 
 // Spy on encryptRequest so tests can inspect the *plaintext* payload
 // HondaAuth builds before it's encrypted, while still exercising the real
@@ -19,7 +24,9 @@ function lastEncryptedPayload(): Record<string, unknown> {
   return mock.mock.calls[mock.mock.calls.length - 1][0];
 }
 
-function fakeHttpClient(responses: Record<string, HttpResponse<any>>): HttpClient {
+type FakeResponse = Omit<HttpResponse<any>, 'headers'> & { headers?: Record<string, string> };
+
+function fakeHttpClient(responses: Record<string, FakeResponse>): HttpClient {
   const calls: { path: string; options: any }[] = [];
   const client = {
     request: jest.fn(async (path: string, options: any = {}) => {
@@ -29,7 +36,7 @@ function fakeHttpClient(responses: Record<string, HttpResponse<any>>): HttpClien
       if (!response) {
         throw new Error(`No fake response configured for ${key}`);
       }
-      return response;
+      return { headers: {}, ...response };
     }),
   } as unknown as HttpClient;
   (client as any).calls = calls;
@@ -54,6 +61,82 @@ describe('toHondaLocale', () => {
 
   it('falls back to "en" for an empty value', () => {
     expect(toHondaLocale('')).toBe('en');
+  });
+});
+
+describe('defaultAuthHeaders (regression for Honda HTTP 400 persisting after the locale fix)', () => {
+  // Captured by comparing the literal wire bytes of this plugin's requests
+  // against pymyhondaplus's (Python `requests`) hitting a local echo
+  // server side by side: `requests.Session()` always adds an `Accept: * /
+  // *` header on top of whatever the project's own DEFAULT_HEADERS dict
+  // specifies, so every real request the reference client has ever sent
+  // Honda carries it — even though it's absent from that dict. undici
+  // (used here) adds no such default, so it was silently missing from
+  // every request this plugin sent, which is why the HTTP 400 persisted
+  // even after the locale was fixed.
+  it('includes an Accept header matching what the reference client always sends', () => {
+    const headers = defaultAuthHeaders('Homebridge');
+    expect(headers.accept).toBe('*/*');
+  });
+
+  it('still includes every other header the reference client sends', () => {
+    const headers = defaultAuthHeaders('Homebridge');
+    expect(headers).toMatchObject({
+      'user-agent': 'okhttp/4.12.0',
+      'accept-encoding': 'gzip',
+      'content-type': 'application/json',
+      'x-app-device-os': 'android',
+      'x-app-device-osversion': '26',
+      'x-app-device-model': 'Homebridge',
+    });
+  });
+});
+
+describe('HondaAuth auth-failure diagnostics', () => {
+  it('logs a sanitized diagnostic (never the email/password) when initiate-login returns HTTP 400', async () => {
+    const http = fakeHttpClient({
+      'POST /auth/initiate-login': {
+        statusCode: 400,
+        raw: '{"errorCode":"validation-error","message":"invalid request"}',
+        body: {},
+        headers: { 'content-type': 'application/json', 'x-request-id': 'req-abc-123' },
+      },
+    });
+    const log = fakeLogger();
+    const auth = new HondaAuth(http, DeviceKey.generate(), log);
+
+    await expect(auth.login('user@example.com', 'super-secret-password', 'en-GB')).rejects.toBeInstanceOf(HondaAuthError);
+
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    const loggedArgs = (log.warn as jest.Mock).mock.calls[0];
+    const loggedText = loggedArgs.join(' ');
+    expect(loggedText).toContain('initiate-login');
+    expect(loggedText).toContain('400');
+    expect(loggedText).toContain('req-abc-123');
+    expect(loggedText).not.toContain('user@example.com');
+    expect(loggedText).not.toContain('super-secret-password');
+  });
+
+  it('does not log a diagnostic on a successful login', async () => {
+    const http = fakeHttpClient({
+      'POST /auth/initiate-login': { statusCode: 200, raw: '{}', body: { transactionId: 't', signatureChallenge: 'c' } },
+      'POST /auth/complete-login': { statusCode: 200, raw: '{}', body: { access_token: 'a', refresh_token: 'r', expires_in: 3600 } },
+    });
+    const log = fakeLogger();
+    const auth = new HondaAuth(http, DeviceKey.generate(), log);
+
+    await auth.login('user@example.com', 'hunter2', 'en-GB');
+
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it('works without a logger (defaults to a no-op) — HondaAuth remains usable in existing call sites', async () => {
+    const http = fakeHttpClient({
+      'POST /auth/initiate-login': { statusCode: 400, raw: '{}', body: {} },
+    });
+    const auth = new HondaAuth(http, DeviceKey.generate());
+
+    await expect(auth.login('user@example.com', 'hunter2', 'en-GB')).rejects.toBeInstanceOf(HondaAuthError);
   });
 });
 

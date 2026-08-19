@@ -15,6 +15,8 @@ export interface HttpResponse<T> {
   statusCode: number;
   body: T;
   raw: string;
+  /** Response headers, normalized to single string values (undici returns string | string[] | undefined). */
+  headers: Record<string, string>;
 }
 
 export interface RequestOptions {
@@ -70,6 +72,17 @@ export class HttpClient {
       }
     }
 
-    return { statusCode: res.statusCode, body: parsed, raw };
+    return { statusCode: res.statusCode, body: parsed, raw, headers: normalizeHeaders(res.headers) };
   }
+}
+
+function normalizeHeaders(headers: Record<string, string | string[] | undefined>): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (value === undefined) {
+      continue;
+    }
+    normalized[key] = Array.isArray(value) ? value.join(', ') : value;
+  }
+  return normalized;
 }

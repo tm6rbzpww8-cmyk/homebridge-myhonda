@@ -20,8 +20,10 @@
  * user to paste the link into their Homebridge config.
  */
 
-import { HttpClient } from './httpClient';
+import { HttpClient, HttpResponse } from './httpClient';
 import { DeviceKey, encryptRequest } from './crypto';
+import { logAuthFailureDiagnostics } from './diagnostics';
+import { HondaClientLogger } from './logger';
 import {
   HondaAccountLockedError,
   HondaAuthError,
@@ -29,19 +31,41 @@ import {
 } from './errors';
 import { InitiateLoginResponse, RawLoginTokens, RefreshTokenResponse } from './types';
 
+const NOOP_LOGGER: HondaClientLogger = {
+  debug: () => undefined,
+  info: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+};
+
 export interface AuthHeaders extends Record<string, string> {
   'user-agent': string;
   'accept-encoding': string;
+  accept: string;
   'content-type': string;
   'x-app-device-os': string;
   'x-app-device-osversion': string;
   'x-app-device-model': string;
 }
 
+/**
+ * The reference client (pymyhondaplus) builds its HTTP session with
+ * Python's `requests` library, which — on top of whatever headers the
+ * project explicitly sets — always adds an `Accept: * / *` header of its
+ * own by default. Every real request that reference client has ever sent
+ * Honda therefore carries that header, even though it's never listed in
+ * its own DEFAULT_HEADERS dict. undici (used here) does not add a default
+ * Accept header, so it was silently missing from every request this
+ * plugin sent — confirmed by capturing the literal wire bytes of both
+ * clients hitting a local echo server side by side. Honda's edge/gateway
+ * rejects a request without it with a bare HTTP 400, before the app layer
+ * even attempts to decrypt the payload.
+ */
 export function defaultAuthHeaders(deviceModel: string): AuthHeaders {
   return {
     'user-agent': 'okhttp/4.12.0',
     'accept-encoding': 'gzip',
+    accept: '*/*',
     'content-type': 'application/json',
     'x-app-device-os': 'android',
     'x-app-device-osversion': '26',
@@ -76,6 +100,7 @@ export class HondaAuth {
   constructor(
     private readonly http: HttpClient,
     private readonly deviceKey: DeviceKey,
+    private readonly log: HondaClientLogger = NOOP_LOGGER,
   ) {}
 
   async initiateLogin(email: string, password: string, locale: string): Promise<InitiateLoginResponse> {
@@ -107,7 +132,7 @@ export class HondaAuth {
       return res.body;
     }
 
-    this.throwAuthError('initiate-login', res.statusCode, res.raw);
+    this.throwAuthError('initiate-login', res, [email, password]);
   }
 
   async completeLogin(
@@ -138,7 +163,7 @@ export class HondaAuth {
       return res.body;
     }
 
-    this.throwAuthError('complete-login', res.statusCode, res.raw);
+    this.throwAuthError('complete-login', res, [email, password]);
   }
 
   /**
@@ -175,7 +200,7 @@ export class HondaAuth {
       resetRes.statusCode !== 202 &&
       !resetRes.raw.includes('currently blocked')
     ) {
-      this.throwAuthError('reset-device-authenticator', resetRes.statusCode, resetRes.raw);
+      this.throwAuthError('reset-device-authenticator', resetRes, [email, password]);
     }
   }
 
@@ -239,7 +264,21 @@ export class HondaAuth {
     );
   }
 
-  private throwAuthError(step: string, statusCode: number, body: string): never {
+  /**
+   * Classifies and throws for a failed auth HTTP call. Always logs a
+   * sanitized diagnostic first (status, allow-listed response headers,
+   * secret-scrubbed body) — this is what makes an otherwise-opaque "HTTP
+   * 400" actionable without needing another live round-trip to find out
+   * what Honda actually said.
+   */
+  private throwAuthError(
+    step: string,
+    response: Pick<HttpResponse<unknown>, 'statusCode' | 'headers' | 'raw'>,
+    secrets: Array<string | undefined> = [],
+  ): never {
+    logAuthFailureDiagnostics(this.log, { step, response, secrets });
+
+    const { statusCode, raw: body } = response;
     if (body.includes('locked-account')) {
       throw new HondaAccountLockedError();
     }
