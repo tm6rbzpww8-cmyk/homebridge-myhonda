@@ -16,6 +16,7 @@ import { HondaAuth, defaultAuthHeaders } from './auth';
 import { StoredTokens, TokenStore } from './tokenStore';
 import { EvStatus, parseEvStatus } from './dashboard';
 import { CapabilityName, parseVehicle, Vehicle } from './vehicle';
+import { redactVinInPath } from './redact';
 import {
   AsyncCommandAccepted,
   AsyncCommandStatusResponse,
@@ -260,7 +261,7 @@ export class HondaApiClient {
     const uri = res.statusQueryGetUri ?? '';
     const idMatch = uri.match(/[?&]id=([^&]+)/);
     if (!idMatch) {
-      throw new HondaApiError(`Honda did not return a command id for ${path}`);
+      throw new HondaApiError(`Honda did not return a command id for ${redactVinInPath(path)}`);
     }
     return decodeURIComponent(idMatch[1]);
   }
@@ -325,7 +326,7 @@ export class HondaApiClient {
     }
 
     if (res.statusCode >= 400) {
-      throw new HondaApiError(`Honda API request failed (${method} ${path}, HTTP ${res.statusCode})`, res.statusCode, res.raw);
+      throw new HondaApiError(`Honda API request failed (${method} ${redactVinInPath(path)}, HTTP ${res.statusCode})`, res.statusCode, res.raw);
     }
 
     return res.body;

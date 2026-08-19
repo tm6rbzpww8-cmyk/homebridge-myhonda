@@ -70,6 +70,29 @@ web_modules/
 .env.*
 !.env.example
 
+# Local Homebridge runtime config, in case a contributor points a local
+# Homebridge instance's storage path at this repo for testing — production
+# installs keep this in Homebridge's own storage directory, well outside
+# this repo, but this is a defense-in-depth backstop against accidentally
+# committing a config.json containing real Honda account credentials.
+# (Root-only: this must not shadow any nested "config.json" the project
+# might legitimately add later, e.g. under a fixtures/ directory.)
+/config.json
+/.homebridge/
+/homebridge-config/
+
+# This plugin's own local token/device-key cache (see src/api/tokenStore.ts),
+# in the same accidental-local-testing scenario as above. Matches the
+# *.tokens.json / *.devicekey.pem naming TokenStore writes, and the
+# "myhonda" subdirectory it creates under a Homebridge storage path. There
+# is no legitimate source/test path with these names in this project (see
+# `git ls-files` — none match), so matching at any depth is safe and does
+# not risk shadowing real code the way a generic name like "accessories/"
+# would (that mistake was caught and reverted while writing this section).
+**/myhonda/
+*.tokens.json
+*.devicekey.pem
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

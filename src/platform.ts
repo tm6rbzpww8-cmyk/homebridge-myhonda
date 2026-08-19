@@ -25,6 +25,7 @@ import {
 } from './api/errors';
 import { isMyHondaPlatformConfig, MyHondaPlatformConfig } from './configTypes';
 import { asHondaClientLogger, VehicleAccessory, VehicleAccessoryOptions } from './accessories/vehicleAccessory';
+import { redactVin } from './api/redact';
 
 const AUTH_RETRY_INTERVAL_MS = 5 * 60_000;
 
@@ -200,7 +201,7 @@ export class MyHondaPlatform implements DynamicPlatformPlugin {
 
       let platformAccessory = this.accessories.get(uuid);
       if (!platformAccessory) {
-        this.log.info('Adding new Honda vehicle: %s (%s)', displayName, vehicle.vin);
+        this.log.info('Adding new Honda vehicle: %s (VIN %s)', displayName, redactVin(vehicle.vin));
         platformAccessory = new this.api.platformAccessory(displayName, uuid);
         this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [platformAccessory]);
         this.accessories.set(uuid, platformAccessory);
@@ -257,9 +258,9 @@ export class MyHondaPlatform implements DynamicPlatformPlugin {
         accessory.applyStatus(status);
       } catch (err) {
         if (err instanceof HondaRateLimitError) {
-          this.log.warn('Honda API rate limit hit while polling %s; will try again next cycle.', vin);
+          this.log.warn('Honda API rate limit hit while polling VIN %s; will try again next cycle.', redactVin(vin));
         } else {
-          this.log.error('Failed to refresh status for vehicle %s: %s', vin, (err as Error).message);
+          this.log.error('Failed to refresh status for VIN %s: %s', redactVin(vin), (err as Error).message);
         }
       }
     }

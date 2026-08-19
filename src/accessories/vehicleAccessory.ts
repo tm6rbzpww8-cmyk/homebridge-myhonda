@@ -23,6 +23,7 @@ import { HondaApiClient, CommandResult, HondaClientLogger } from '../api/client'
 import { EvStatus } from '../api/dashboard';
 import { Vehicle } from '../api/vehicle';
 import { HondaApiError, HondaCapabilityError, HondaVehicleUnreachableError } from '../api/errors';
+import { redactVin } from '../api/redact';
 import { VehicleOverrideConfig } from '../configTypes';
 
 export interface VehicleAccessoryOptions {
@@ -101,6 +102,15 @@ export class VehicleAccessory {
     return this.vehicle.vin;
   }
 
+  /**
+   * Label used in log output: the vehicle's nickname when set, otherwise a
+   * redacted VIN (last 4 characters only) — enough to tell multiple
+   * vehicles apart in the log without printing the full VIN.
+   */
+  private get logLabel(): string {
+    return this.vehicle.nickname || redactVin(this.vin);
+  }
+
   /** Called when the platform re-fetches the vehicle list (e.g. capability changes after a Honda app update). */
   updateVehicle(vehicle: Vehicle): void {
     this.vehicle = vehicle;
@@ -147,7 +157,7 @@ export class VehicleAccessory {
           throw this.notSupportedError();
         }
         const targetLocked = value === this.Characteristic.LockTargetState.SECURED;
-        this.log.info('%s: %s doors', this.vehicle.nickname || this.vin, targetLocked ? 'Locking' : 'Unlocking');
+        this.log.info('%s: %s doors', this.logLabel, targetLocked ? 'Locking' : 'Unlocking');
         try {
           const result = targetLocked
             ? await this.client.lockDoors(this.vin, this.vehicle)
@@ -212,7 +222,7 @@ export class VehicleAccessory {
     sw.getCharacteristic(this.Characteristic.On)
       .onGet(() => this.lastStatus?.climateActive ?? false)
       .onSet(async (value) => {
-        this.log.info('%s: turning climate control %s', this.vehicle.nickname || this.vin, value ? 'on' : 'off');
+        this.log.info('%s: turning climate control %s', this.logLabel, value ? 'on' : 'off');
         try {
           const result = value
             ? await this.client.startClimate(this.vin, this.vehicle)
@@ -230,7 +240,7 @@ export class VehicleAccessory {
     sw.getCharacteristic(this.Characteristic.On)
       .onGet(() => this.lastStatus?.chargeStatus === 'charging')
       .onSet(async (value) => {
-        this.log.info('%s: turning charging %s', this.vehicle.nickname || this.vin, value ? 'on' : 'off');
+        this.log.info('%s: turning charging %s', this.logLabel, value ? 'on' : 'off');
         try {
           const result = value
             ? await this.client.startCharging(this.vin, this.vehicle)
@@ -252,7 +262,7 @@ export class VehicleAccessory {
         if (!value) {
           return;
         }
-        this.log.info('%s: sounding horn & flashing lights', this.vehicle.nickname || this.vin);
+        this.log.info('%s: sounding horn & flashing lights', this.logLabel);
         try {
           const result = await this.client.honkAndFlash(this.vin, this.vehicle);
           this.assertCommandOk(result);
@@ -337,12 +347,12 @@ export class VehicleAccessory {
     }
 
     if (status.activeWarnings.length > 0) {
-      this.log.warn('%s: active warning lamps: %s', this.vehicle.nickname || this.vin, status.activeWarnings.join(', '));
+      this.log.warn('%s: active warning lamps: %s', this.logLabel, status.activeWarnings.join(', '));
     }
 
     this.log.debug(
       '%s: battery %d%%, range %dkm (climate on) / %dkm (climate off), charge=%s, plug=%s, doors %s',
-      this.vehicle.nickname || this.vin,
+      this.logLabel,
       status.batteryLevelPercent,
       status.rangeClimateOn,
       status.rangeClimateOff,
@@ -362,18 +372,18 @@ export class VehicleAccessory {
 
   private handleCommandError(err: unknown, action: string): never {
     if (err instanceof HondaVehicleUnreachableError) {
-      this.log.warn('%s: %s command timed out — vehicle may be asleep or out of coverage', this.vehicle.nickname || this.vin, action);
+      this.log.warn('%s: %s command timed out — vehicle may be asleep or out of coverage', this.logLabel, action);
       throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.OPERATION_TIMED_OUT);
     }
     if (err instanceof HondaCapabilityError) {
-      this.log.warn('%s: %s is not supported on this vehicle', this.vehicle.nickname || this.vin, action);
+      this.log.warn('%s: %s is not supported on this vehicle', this.logLabel, action);
       throw this.notSupportedError();
     }
     if (err instanceof HondaApiError) {
-      this.log.error('%s: %s failed: %s', this.vehicle.nickname || this.vin, action, err.message);
+      this.log.error('%s: %s failed: %s', this.logLabel, action, err.message);
       throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
     }
-    this.log.error('%s: unexpected error during %s: %s', this.vehicle.nickname || this.vin, action, (err as Error).message);
+    this.log.error('%s: unexpected error during %s: %s', this.logLabel, action, (err as Error).message);
     throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
   }
 }

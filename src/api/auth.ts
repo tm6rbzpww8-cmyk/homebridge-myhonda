@@ -172,7 +172,15 @@ export class HondaAuth {
   ): Promise<RawLoginTokens> {
     const { key, type } = parseVerificationLink(verificationLink);
     if (!key) {
-      throw new HondaAuthError(`Could not parse a verification key out of the provided link: ${verificationLink}`);
+      // Deliberately does not include verificationLink (or any substring of
+      // it) in this message: a link that fails to parse as a URL may still
+      // contain the one-time verification key as raw text, and this error
+      // can surface all the way up to a Homebridge log line.
+      throw new HondaAuthError(
+        'Could not find a "key" parameter in the provided verification link. Make sure you pasted the complete ' +
+        'URL from Honda\'s verification email (the whole address bar contents, starting with "https://"), not ' +
+        'just part of it.',
+      );
     }
 
     // The reference client percent-encodes the key with Python's

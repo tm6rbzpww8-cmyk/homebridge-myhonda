@@ -113,6 +113,23 @@ describe('HondaAuth.completeDeviceVerification', () => {
     await expect(auth.completeDeviceVerification('u@example.com', 'p', 'not-a-url')).rejects.toBeInstanceOf(HondaAuthError);
   });
 
+  it('never includes the raw verification link (or its secret key) in the error for an unparsable link', async () => {
+    const http = fakeHttpClient({});
+    const auth = new HondaAuth(http, DeviceKey.generate());
+    const secretLookingLink = 'https://mobile-api.connected.honda-eu.com/auth/verify-link?type=mfa&notkey=ab+c/d==secretvalue';
+
+    let caught: Error | undefined;
+    try {
+      await auth.completeDeviceVerification('u@example.com', 'p', secretLookingLink);
+    } catch (err) {
+      caught = err as Error;
+    }
+
+    expect(caught).toBeInstanceOf(HondaAuthError);
+    expect(caught?.message).not.toContain(secretLookingLink);
+    expect(caught?.message).not.toContain('ab+c/d==secretvalue');
+  });
+
   it('sends the verification key with +, /, = left unescaped, matching the reference client', async () => {
     // The reference (pymyhondaplus) builds this URL with
     // urllib.parse.quote(key, safe="+/="), so a base64-shaped key must

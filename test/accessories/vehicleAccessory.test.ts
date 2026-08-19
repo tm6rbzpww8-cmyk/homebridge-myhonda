@@ -101,10 +101,15 @@ function fakeClient(overrides: Partial<Record<keyof HondaApiClient, jest.Mock>> 
   } as unknown as HondaApiClient;
 }
 
-function buildAccessory(vehicle: Vehicle, client: HondaApiClient, options: VehicleAccessoryOptions = FULL_OPTIONS) {
+function buildAccessory(
+  vehicle: Vehicle,
+  client: HondaApiClient,
+  options: VehicleAccessoryOptions = FULL_OPTIONS,
+  log: Logger = fakeLogger(),
+) {
   const platformAccessory = new PlatformAccessory('Test Car', uuid.generate(vehicle.vin));
-  const accessory = new VehicleAccessory(fakeApi(), fakeLogger(), platformAccessory as any, vehicle, client, options, undefined);
-  return { platformAccessory, accessory };
+  const accessory = new VehicleAccessory(fakeApi(), log, platformAccessory as any, vehicle, client, options, undefined);
+  return { platformAccessory, accessory, log };
 }
 
 describe('VehicleAccessory service setup', () => {
@@ -191,6 +196,35 @@ describe('VehicleAccessory applyStatus', () => {
     const sensor = platformAccessory.getService(Service.TemperatureSensor)!;
     expect(sensor).toBeDefined();
     expect(sensor.getCharacteristic(Characteristic.CurrentTemperature).value).toBe(21);
+  });
+});
+
+describe('VehicleAccessory log redaction', () => {
+  it('never logs the full VIN, falling back to a redacted VIN when no nickname is set', async () => {
+    const client = fakeClient();
+    const vehicleWithoutNickname = makeVehicle({ nickname: '', vin: 'SHHGE1234500001' }, FULL_CAPS);
+    const { platformAccessory, log } = buildAccessory(vehicleWithoutNickname, client);
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+
+    await lock.getCharacteristic(Characteristic.LockTargetState).handleSetRequest(Characteristic.LockTargetState.SECURED, undefined as any);
+
+    const allLoggedText = [...(log.info as jest.Mock).mock.calls, ...(log.warn as jest.Mock).mock.calls, ...(log.error as jest.Mock).mock.calls]
+      .flat()
+      .filter((arg): arg is string => typeof arg === 'string')
+      .join('\n');
+
+    expect(allLoggedText).not.toContain('SHHGE1234500001');
+    expect(allLoggedText).toContain('…0001');
+  });
+
+  it('prefers the nickname over the VIN in logs when a nickname is set', async () => {
+    const client = fakeClient();
+    const { platformAccessory, log } = buildAccessory(makeVehicle({ nickname: 'My Honda e', vin: 'SHHGE1234500001' }, FULL_CAPS), client);
+    const lock = platformAccessory.getService(Service.LockMechanism)!;
+
+    await lock.getCharacteristic(Characteristic.LockTargetState).handleSetRequest(Characteristic.LockTargetState.SECURED, undefined as any);
+
+    expect(log.info).toHaveBeenCalledWith(expect.stringContaining('%s'), 'My Honda e', expect.anything());
   });
 });
 

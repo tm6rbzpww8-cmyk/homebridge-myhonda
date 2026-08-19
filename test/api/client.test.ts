@@ -213,6 +213,41 @@ describe('HondaApiClient remote commands', () => {
     expect(result.outcome).toBe('success');
   });
 
+  it('never includes the full VIN in an error message from a failed authenticated request', async () => {
+    const client = await loggedInClient();
+    queueResponses({
+      'GET /tsp/dashboard-latest': jsonResponse(500, { error: 'boom' }),
+    });
+
+    let caught: Error | undefined;
+    try {
+      await client.getDashboard(CAPABLE_VEHICLE.vin);
+    } catch (err) {
+      caught = err as Error;
+    }
+
+    expect(caught).toBeDefined();
+    expect(caught?.message).not.toContain(CAPABLE_VEHICLE.vin);
+    expect(caught?.message).toContain('…N123'); // last 4 chars of VIN123, still identifiable
+  });
+
+  it('never includes the full VIN in an error message when Honda omits a command id', async () => {
+    const client = await loggedInClient();
+    queueResponses({
+      'POST /tsp/remote-lock': jsonResponse(202, { statusQueryGetUri: 'https://x/y?nope=1' }),
+    });
+
+    let caught: Error | undefined;
+    try {
+      await client.lockDoors(CAPABLE_VEHICLE.vin, CAPABLE_VEHICLE as any);
+    } catch (err) {
+      caught = err as Error;
+    }
+
+    expect(caught).toBeDefined();
+    expect(caught?.message).not.toContain(CAPABLE_VEHICLE.vin);
+  });
+
   it('reports a timed-out command outcome when Honda flags functionTimedOut', async () => {
     const client = await loggedInClient();
     queueResponses({
