@@ -26,8 +26,24 @@ import {
 import { isMyHondaPlatformConfig, MyHondaPlatformConfig } from './configTypes';
 import { asHondaClientLogger, VehicleAccessory, VehicleAccessoryOptions } from './accessories/vehicleAccessory';
 import { redactVin } from './api/redact';
+import { GIT_COMMIT } from './buildInfo';
 
 const AUTH_RETRY_INTERVAL_MS = 5 * 60_000;
+
+/**
+ * Reads the installed package's own version at runtime — package.json ships
+ * alongside dist/ regardless of how the plugin was installed, unlike the
+ * git history GIT_COMMIT depends on (see buildInfo.ts), so this is read
+ * fresh here rather than also being baked in at build time.
+ */
+function pluginVersion(): string {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return (require('../package.json') as { version: string }).version;
+  } catch {
+    return '0.0.0';
+  }
+}
 
 export class MyHondaPlatform implements DynamicPlatformPlugin {
   public readonly Service: typeof Service;
@@ -44,6 +60,12 @@ export class MyHondaPlatform implements DynamicPlatformPlugin {
     config: PlatformConfig,
     public readonly api: API,
   ) {
+    // Logged unconditionally, before config validation, so the exact build
+    // running is identifiable from the log even when the config is broken —
+    // several rapid fixes made it hard to tell which commit was actually
+    // installed on a given Homebridge instance (see CHANGELOG 1.0.1).
+    this.log.info('My Honda v%s initialising... (commit %s)', pluginVersion(), GIT_COMMIT);
+
     this.Service = api.hap.Service;
     this.Characteristic = api.hap.Characteristic;
 

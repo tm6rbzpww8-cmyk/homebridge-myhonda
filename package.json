@@ -1,6 +1,6 @@
 {
   "name": "homebridge-myhonda",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Homebridge plugin that brings your Honda vehicle (via the My Honda+ / Honda Connect Europe app) into Apple HomeKit: lock/unlock, battery & charge status, range, charging control, climate pre-conditioning, and home/away presence.",
   "license": "MIT",
   "author": "tm6rbzpww8-cmyk",
@@ -37,7 +37,7 @@
     "homebridge": "^1.8.0 || ^2.0.0-beta.0"
   },
   "scripts": {
-    "build": "rimraf dist && tsc",
+    "build": "node scripts/write-build-info.js && rimraf dist && tsc",
     "prepare": "npm run build",
     "prepublishOnly": "npm run lint && npm run build && npm test",
     "watch": "tsc --watch",

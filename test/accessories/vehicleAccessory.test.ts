@@ -631,10 +631,8 @@ describe('VehicleAccessory Climate command repetition (regression for the live-h
     expect(client.stopClimate).not.toHaveBeenCalled();
   });
 
-  it('a command timeout is surfaced to HomeKit as OPERATION_TIMED_OUT and does not retry automatically or get stuck', async () => {
-    const startClimate = jest.fn()
-      .mockRejectedValueOnce(new HondaVehicleUnreachableError())
-      .mockResolvedValueOnce({ outcome: 'success' });
+  it('a command timeout is surfaced to HomeKit as OPERATION_TIMED_OUT and does not get the switch stuck showing "on"', async () => {
+    const startClimate = jest.fn().mockRejectedValue(new HondaVehicleUnreachableError());
     const client = fakeClient({ startClimate });
     const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
     const onChar = platformAccessory.getServiceById(Service.Switch, 'climate')!.getCharacteristic(Characteristic.On);
@@ -646,14 +644,76 @@ describe('VehicleAccessory Climate command repetition (regression for the live-h
     // reads back whatever the last known-good state was (off, the
     // default before any status poll), not stuck showing "on".
     expect(onChar.value).toBe(false);
+  });
 
-    // The guard must not be left permanently locked by the failure: a
-    // fresh, later tap has to be able to try again (and this time it
-    // succeeds), proving the timeout did not retry automatically and did
-    // not wedge the control.
-    await onChar.handleSetRequest(true, undefined as any);
+  it('REGRESSION (live hardware): a write for the same target arriving shortly after the previous attempt already timed out — not while it was still in flight — does not dispatch a second Honda command', async () => {
+    // This is the exact real-world pattern: "turning climate control on"
+    // repeated ~9-25s apart with "climate control command timed out" in
+    // between each one — sequential, not concurrent. Pure in-flight
+    // de-duplication (the previous fix) does nothing here, because by the
+    // time each retry arrives, the prior attempt has already settled
+    // (failed) and cleared its in-flight marker, so it looked like a
+    // brand-new, fully legitimate request.
+    const startClimate = jest.fn().mockRejectedValue(new HondaVehicleUnreachableError());
+    const client = fakeClient({ startClimate });
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const onChar = platformAccessory.getServiceById(Service.Switch, 'climate')!.getCharacteristic(Characteristic.On);
+
+    // Six sequential "on" writes, each awaited to completion (so each
+    // previous one has fully settled/timed out) before the next arrives —
+    // exactly like the live log, not an overlapping burst.
+    for (let i = 0; i < 6; i++) {
+      await expect(onChar.handleSetRequest(true, undefined as any)).rejects.toBe(HAPStatus.OPERATION_TIMED_OUT);
+    }
+
+    expect(startClimate).toHaveBeenCalledTimes(1);
+  });
+
+  it('a fresh command for the same target is allowed again once the settle window has passed since the failure', async () => {
+    const startClimate = jest.fn()
+      .mockRejectedValueOnce(new HondaVehicleUnreachableError())
+      .mockResolvedValueOnce({ outcome: 'success' });
+    const client = fakeClient({ startClimate });
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const onChar = platformAccessory.getServiceById(Service.Switch, 'climate')!.getCharacteristic(Characteristic.On);
+
+    await expect(onChar.handleSetRequest(true, undefined as any)).rejects.toBe(HAPStatus.OPERATION_TIMED_OUT);
+    expect(startClimate).toHaveBeenCalledTimes(1);
+
+    const realNow = Date.now();
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(realNow + 3 * 60_000);
+    try {
+      await onChar.handleSetRequest(true, undefined as any);
+    } finally {
+      nowSpy.mockRestore();
+    }
     expect(startClimate).toHaveBeenCalledTimes(2);
     expect(onChar.value).toBe(true);
+  });
+
+  it('REGRESSION (live hardware, requested scenario): ON command in flight, three stale polls, then the command times out — still exactly one Honda call, no automatic retry', async () => {
+    const { promise: climatePromise, reject: rejectClimate } = deferred<CommandResult>();
+    const startClimate = jest.fn().mockReturnValue(climatePromise);
+    const client = fakeClient({ startClimate });
+    const { platformAccessory, accessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const onChar = platformAccessory.getServiceById(Service.Switch, 'climate')!.getCharacteristic(Characteristic.On);
+
+    accessory.applyStatus(evStatus({ climateActive: false }));
+    const onRequest = onChar.handleSetRequest(true, undefined as any);
+
+    // Three stale polls while the command is still unresolved.
+    accessory.applyStatus(evStatus({ climateActive: false }));
+    accessory.applyStatus(evStatus({ climateActive: false }));
+    accessory.applyStatus(evStatus({ climateActive: false }));
+
+    rejectClimate(new HondaVehicleUnreachableError());
+    await expect(onRequest).rejects.toBe(HAPStatus.OPERATION_TIMED_OUT);
+    expect(startClimate).toHaveBeenCalledTimes(1);
+
+    // A further write for the same target immediately after the timeout —
+    // simulating HomeKit's own automatic retry — must not dispatch again.
+    await expect(onChar.handleSetRequest(true, undefined as any)).rejects.toBe(HAPStatus.OPERATION_TIMED_OUT);
+    expect(startClimate).toHaveBeenCalledTimes(1);
   });
 
   it('multiple concurrent duplicate writes while a command is timing out still produce only one Honda call — no retry storm', async () => {
@@ -728,7 +788,20 @@ describe('VehicleAccessory Charging command repetition (same guard as Climate)',
     expect(client.stopCharging).not.toHaveBeenCalled();
   });
 
-  it('a command timeout does not retry automatically and does not get stuck', async () => {
+  it('a command timeout does not retry automatically: repeated sequential writes for the same target after it already timed out produce only one Honda call', async () => {
+    const startCharging = jest.fn().mockRejectedValue(new HondaVehicleUnreachableError());
+    const client = fakeClient({ startCharging });
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const onChar = platformAccessory.getServiceById(Service.Switch, 'charging')!.getCharacteristic(Characteristic.On);
+
+    for (let i = 0; i < 3; i++) {
+      await expect(onChar.handleSetRequest(true, undefined as any)).rejects.toBe(HAPStatus.OPERATION_TIMED_OUT);
+    }
+
+    expect(startCharging).toHaveBeenCalledTimes(1);
+  });
+
+  it('a fresh charging command for the same target is allowed again once the settle window has passed since the failure', async () => {
     const startCharging = jest.fn()
       .mockRejectedValueOnce(new HondaVehicleUnreachableError())
       .mockResolvedValueOnce({ outcome: 'success' });
@@ -737,9 +810,13 @@ describe('VehicleAccessory Charging command repetition (same guard as Climate)',
     const onChar = platformAccessory.getServiceById(Service.Switch, 'charging')!.getCharacteristic(Characteristic.On);
 
     await expect(onChar.handleSetRequest(true, undefined as any)).rejects.toBe(HAPStatus.OPERATION_TIMED_OUT);
-    expect(startCharging).toHaveBeenCalledTimes(1);
 
-    await onChar.handleSetRequest(true, undefined as any);
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 3 * 60_000);
+    try {
+      await onChar.handleSetRequest(true, undefined as any);
+    } finally {
+      nowSpy.mockRestore();
+    }
     expect(startCharging).toHaveBeenCalledTimes(2);
   });
 });
@@ -771,12 +848,10 @@ describe('VehicleAccessory Horn/Find My Car command repetition (same guard, mome
     expect(client.honkAndFlash).toHaveBeenCalledTimes(1);
   });
 
-  it('a command timeout does not retry automatically, still resets the switch to off, and does not get stuck', async () => {
+  it('a command timeout does not retry automatically, still resets the switch to off, and repeated sequential triggers after the timeout produce only one Honda call', async () => {
     jest.useFakeTimers();
     try {
-      const honkAndFlash = jest.fn()
-        .mockRejectedValueOnce(new HondaVehicleUnreachableError())
-        .mockResolvedValueOnce({ outcome: 'success' });
+      const honkAndFlash = jest.fn().mockRejectedValue(new HondaVehicleUnreachableError());
       const client = fakeClient({ honkAndFlash });
       const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
       const onChar = platformAccessory.getServiceById(Service.Switch, 'horn')!.getCharacteristic(Characteristic.On);
@@ -787,11 +862,30 @@ describe('VehicleAccessory Horn/Find My Car command repetition (same guard, mome
       jest.advanceTimersByTime(1500);
       expect(onChar.value).toBe(false);
 
-      await onChar.handleSetRequest(true, undefined as any);
-      expect(honkAndFlash).toHaveBeenCalledTimes(2);
+      await expect(onChar.handleSetRequest(true, undefined as any)).rejects.toBe(HAPStatus.OPERATION_TIMED_OUT);
+      expect(honkAndFlash).toHaveBeenCalledTimes(1);
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('a fresh honk is allowed again once the settle window has passed since the failure', async () => {
+    const honkAndFlash = jest.fn()
+      .mockRejectedValueOnce(new HondaVehicleUnreachableError())
+      .mockResolvedValueOnce({ outcome: 'success' });
+    const client = fakeClient({ honkAndFlash });
+    const { platformAccessory } = buildAccessory(makeVehicle({}, FULL_CAPS), client);
+    const onChar = platformAccessory.getServiceById(Service.Switch, 'horn')!.getCharacteristic(Characteristic.On);
+
+    await expect(onChar.handleSetRequest(true, undefined as any)).rejects.toBe(HAPStatus.OPERATION_TIMED_OUT);
+
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 3 * 60_000);
+    try {
+      await onChar.handleSetRequest(true, undefined as any);
+    } finally {
+      nowSpy.mockRestore();
+    }
+    expect(honkAndFlash).toHaveBeenCalledTimes(2);
   });
 });
 

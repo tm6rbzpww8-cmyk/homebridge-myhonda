@@ -105,17 +105,19 @@ export class VehicleAccessory {
   private lastStatus?: EvStatus;
 
   // One RemoteCommandGuard per writable control — see remoteCommandGuard.ts
-  // for why every one of these needs the same in-flight/stale-poll
-  // protection, and why it lives in one shared place rather than being
-  // re-implemented per service.
-  private readonly lockGuard = new RemoteCommandGuard<boolean>(COMMAND_SETTLE_MS);
-  private readonly climateGuard = new RemoteCommandGuard<boolean>(COMMAND_SETTLE_MS);
-  private readonly chargeGuard = new RemoteCommandGuard<boolean>(COMMAND_SETTLE_MS);
+  // for why every one of these needs the same in-flight/stale-poll/retry-
+  // after-failure protection, and why it lives in one shared place rather
+  // than being re-implemented per service. Each is given this accessory's
+  // own logger so its request-by-request decisions (deduplicated /
+  // short-circuited / dispatched) can be traced at debug level.
+  private readonly lockGuard: RemoteCommandGuard<boolean>;
+  private readonly climateGuard: RemoteCommandGuard<boolean>;
+  private readonly chargeGuard: RemoteCommandGuard<boolean>;
   // The horn/lights trigger is a momentary action, not a persisted vehicle
   // state HomeKit mirrors from polling (its On characteristic always reads
   // back false — see setupHornSwitch()), so this guard only ever needs its
-  // in-flight de-duplication, never effective().
-  private readonly hornGuard = new RemoteCommandGuard<boolean>(COMMAND_SETTLE_MS);
+  // in-flight/retry-after-failure de-duplication, never effective().
+  private readonly hornGuard: RemoteCommandGuard<boolean>;
 
   constructor(
     private readonly api: API,
@@ -128,6 +130,10 @@ export class VehicleAccessory {
   ) {
     this.options = resolveOptions(baseOptions, override);
     this.isElectric = vehicle.fuelType.toUpperCase() === 'E';
+    this.lockGuard = new RemoteCommandGuard<boolean>(COMMAND_SETTLE_MS, this.log, 'lock');
+    this.climateGuard = new RemoteCommandGuard<boolean>(COMMAND_SETTLE_MS, this.log, 'climate');
+    this.chargeGuard = new RemoteCommandGuard<boolean>(COMMAND_SETTLE_MS, this.log, 'charge');
+    this.hornGuard = new RemoteCommandGuard<boolean>(COMMAND_SETTLE_MS, this.log, 'horn');
 
     this.setupAccessoryInformation();
     this.setupLockService();
@@ -332,6 +338,7 @@ export class VehicleAccessory {
       .onGet(() => this.climateOn())
       .onSet(async (value) => {
         const target = Boolean(value);
+        this.log.debug('%s: Climate onSet invoked from HomeKit, requested target=%s', this.logLabel, target);
         try {
           await this.climateGuard.run(target, async () => {
             this.log.info('%s: turning climate control %s', this.logLabel, target ? 'on' : 'off');
@@ -353,7 +360,12 @@ export class VehicleAccessory {
     if (!this.lastStatus) {
       return false;
     }
-    return this.climateGuard.effective(this.lastStatus.climateActive) ?? false;
+    const value = this.climateGuard.effective(this.lastStatus.climateActive) ?? false;
+    this.log.debug(
+      '%s: Climate effective() polled=%s -> effective=%s',
+      this.logLabel, this.lastStatus.climateActive, value,
+    );
+    return value;
   }
 
   private setupChargeSwitch(): void {
@@ -493,7 +505,11 @@ export class VehicleAccessory {
         : this.Characteristic.ContactSensorState.CONTACT_NOT_DETECTED,
     );
 
-    this.service.climateSwitch?.updateCharacteristic(this.Characteristic.On, this.climateOn());
+    if (this.service.climateSwitch) {
+      const climateValue = this.climateOn();
+      this.log.debug('%s: applyStatus updating Climate characteristic to %s', this.logLabel, climateValue);
+      this.service.climateSwitch.updateCharacteristic(this.Characteristic.On, climateValue);
+    }
     this.service.chargeSwitch?.updateCharacteristic(this.Characteristic.On, this.chargeOn());
 
     this.service.presence?.updateCharacteristic(

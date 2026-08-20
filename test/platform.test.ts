@@ -4,6 +4,7 @@ import type { API, Logger, PlatformConfig } from 'homebridge';
 
 import { HondaVerificationRequiredError } from '../src/api/errors';
 import { PLATFORM_NAME, PLUGIN_NAME } from '../src/settings';
+import packageJson from '../package.json';
 
 jest.mock('../src/api/client');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -67,6 +68,26 @@ describe('MyHondaPlatform config validation', () => {
 
     expect(log.error).toHaveBeenCalledWith(expect.stringContaining('is not configured'));
     expect(HondaApiClient).not.toHaveBeenCalled();
+  });
+});
+
+describe('MyHondaPlatform startup diagnostic', () => {
+  // Several rapid fixes made it hard to tell which commit was actually
+  // running on a given Homebridge install — this log line is the fix:
+  // every startup identifies the exact build, unconditionally, even before
+  // config validation, so it appears regardless of whether the config
+  // itself is valid.
+  it('logs the plugin name, version, and commit unconditionally, before config validation', () => {
+    const log = fakeLogger();
+    const { api } = fakeApi();
+
+    new MyHondaPlatform(log, { platform: PLATFORM_NAME, name: 'My Honda' } as PlatformConfig, api);
+
+    expect(log.info).toHaveBeenCalledWith(
+      expect.stringContaining('My Honda v%s initialising'),
+      packageJson.version,
+      expect.any(String),
+    );
   });
 });
 

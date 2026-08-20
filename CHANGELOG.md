@@ -4,6 +4,34 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [1.0.1] - 2026-08-20
+
+- Fixed a live-hardware Climate command-repetition case the 04f9ac6 `RemoteCommandGuard` fix did not
+  cover: six real "turning climate control on" commands were sent, roughly 9-25 seconds apart, each
+  landing *after* the previous one had already timed out — sequential, not concurrent. Pure
+  in-flight de-duplication only helps when a duplicate write arrives while the first command is
+  still running; here, by the time each HomeKit retry arrived, the prior attempt had already settled
+  (failed) and cleared its in-flight marker, so it looked like a brand-new, fully legitimate request
+  and was dispatched to Honda again. `RemoteCommandGuard` now also remembers a failed target for the
+  same settle window used for confirmed successes: an identical retry for that target within the
+  window reuses the cached failure instead of hitting Honda again, while a different target, or the
+  same target after the window passes, still runs normally. Confirmed via a regression test built
+  directly against the actual code from commit 04f9ac6 that it reproduces the exact failure (6 real
+  calls instead of 1) before the fix, and via a debug-level diagnostic trace (`log.debug`, silent
+  unless Homebridge's verbose/debug mode is on) added to every guard decision — deduplicated /
+  short-circuited / dispatched, with in-flight and desired/failure state — so this class of issue can
+  be confirmed directly from the Homebridge log in the future. No authentication, API, encryption, or
+  configuration changes.
+- Added build/version identification, since several rapid fixes made it hard to tell which commit
+  was actually running on a given Homebridge install: every startup now logs `My Honda vX.Y.Z
+  initialising... (commit <sha>)` unconditionally, before config validation, so the exact build is
+  identifiable even when the config itself is broken. The commit is captured at build time (a
+  generated `src/buildInfo.ts`, since an installed copy of this package cannot reliably read `.git`
+  at runtime) — `npm run build` regenerates it from the actual checked-out commit before compiling,
+  which also runs automatically during `npm install github:...#branch` via `prepare`. From this
+  release onward, every functional change increments `package.json`'s version.
 - Fixed the same command-repetition problem found on the Doors lock reappearing on Climate: tapping
   Climate on could produce three "turning climate control on" commands seconds apart, followed by a
   string of timeouts. Root cause: a HomeKit controller that doesn't see a write acknowledged quickly

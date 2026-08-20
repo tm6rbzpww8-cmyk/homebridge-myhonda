@@ -49,27 +49,75 @@ describe('RemoteCommandGuard', () => {
     expect(offCommand).toHaveBeenCalledTimes(1);
   });
 
-  it('clears the in-flight marker once the command settles, so a later identical request runs again', async () => {
+  it('clears the in-flight marker once the command settles, but a later identical request within the settle window is a no-op — the target is already confirmed', async () => {
     const guard = new RemoteCommandGuard<boolean>(1000);
     const command = jest.fn().mockResolvedValue(undefined);
 
     await guard.run(true, command);
+    await guard.run(true, command); // still within the settle window — already confirmed
+
+    expect(command).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs a genuinely fresh command once the settle window has passed for an already-confirmed target', async () => {
+    const guard = new RemoteCommandGuard<boolean>(1000);
+    const command = jest.fn().mockResolvedValue(undefined);
+
     await guard.run(true, command);
+
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 1001);
+    try {
+      await guard.run(true, command);
+    } finally {
+      nowSpy.mockRestore();
+    }
 
     expect(command).toHaveBeenCalledTimes(2);
   });
 
-  it('does not record a failed command as desired, and clears in-flight on failure so a later request can retry', async () => {
+  it('does not record a failed command as desired, and a later identical request within the settle window reuses the cached failure instead of retrying Honda', async () => {
+    // Regression for the live-hardware Climate repetition: HomeKit resending
+    // a write for the same target shortly after the previous attempt for
+    // that target already timed out (not while it was still in flight) must
+    // not become a second real Honda command.
+    const guard = new RemoteCommandGuard<boolean>(60_000);
+    const command = jest.fn().mockRejectedValue(new Error('boom'));
+
+    await expect(guard.run(true, command)).rejects.toThrow('boom');
+    expect(guard.effective(false)).toBe(false); // failure never overrides polled data
+
+    await expect(guard.run(true, command)).rejects.toThrow('boom');
+    expect(command).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs a fresh command for the same target again once the settle window has passed since the failure', async () => {
     const guard = new RemoteCommandGuard<boolean>(1000);
     const command = jest.fn()
       .mockRejectedValueOnce(new Error('boom'))
       .mockResolvedValueOnce(undefined);
 
     await expect(guard.run(true, command)).rejects.toThrow('boom');
-    expect(guard.effective(false)).toBe(false); // failure never overrides polled data
 
-    await guard.run(true, command);
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 1001);
+    try {
+      await guard.run(true, command);
+    } finally {
+      nowSpy.mockRestore();
+    }
+
     expect(command).toHaveBeenCalledTimes(2);
+  });
+
+  it('still runs a fresh command for a different target while a prior target is short-circuited by a recent failure', async () => {
+    const guard = new RemoteCommandGuard<boolean>(60_000);
+    const onCommand = jest.fn().mockRejectedValue(new Error('boom'));
+    const offCommand = jest.fn().mockResolvedValue(undefined);
+
+    await expect(guard.run(true, onCommand)).rejects.toThrow('boom');
+    await guard.run(false, offCommand);
+
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    expect(offCommand).toHaveBeenCalledTimes(1);
   });
 
   it('a duplicate request while a command is failing shares the same rejection, without a second Honda call', async () => {
